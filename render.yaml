@@ -1,0 +1,17 @@
+# render.yaml - Render Blueprint specification
+# This file defines the service configuration for Render deployment
+
+services:
+  - type: web
+    name: json-table-converter
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    # Free tier settings
+    plan: free
+    # No persistent disk = no data storage
+    # Auto-deploy on push
+    autoDeploy: true
