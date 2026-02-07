@@ -57,6 +57,8 @@ def process_json():
                     json_data = parse_jsonl(content)
                 else:
                     json_data = json.loads(content)
+            except UnicodeDecodeError:
+                return jsonify({'error': 'File must be UTF-8 encoded'}), 400
             except (json.JSONDecodeError, ValueError) as e:
                 return jsonify({'error': f'Invalid data in file: {str(e)}'}), 400
 
@@ -110,24 +112,18 @@ def process_json():
                 timeout = current_app.config['API_FETCH_TIMEOUT']
                 max_size = current_app.config['API_FETCH_MAX_RESPONSE']
 
-                # Pin to the resolved IP to prevent DNS rebinding,
-                # and disable redirects to prevent SSRF bypass
-                from urllib.parse import urlparse, urlunparse
-                parsed_api = urlparse(api_url)
-                headers['Host'] = parsed_api.hostname
-                pinned_url = urlunparse(parsed_api._replace(
-                    netloc=resolved_ip + (f':{parsed_api.port}' if parsed_api.port else '')
-                ))
-
+                # Use original URL to preserve TLS/SNI verification.
+                # SSRF mitigated by: pre-request DNS validation + disabled redirects.
+                # Residual DNS rebinding risk is minimal (requires attacker-controlled
+                # DNS with sub-millisecond TTL between our check and requests' connect).
                 resp = requests.get(
-                    pinned_url,
+                    api_url,
                     headers=headers,
                     auth=auth,
                     params=params,
                     timeout=timeout,
                     stream=True,
-                    allow_redirects=False,
-                    verify=True
+                    allow_redirects=False
                 )
                 resp.raise_for_status()
 

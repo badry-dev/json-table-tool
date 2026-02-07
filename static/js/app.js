@@ -400,7 +400,10 @@ function downloadDelimited(columns, data, delimiter, filename) {
         output += line + '\n';
     });
 
-    const blob = new Blob([output], { type: 'text/plain;charset=utf-8' });
+    const mimeType = delimiter === '\t'
+        ? 'text/tab-separated-values; charset=utf-8'
+        : 'text/csv; charset=utf-8';
+    const blob = new Blob([output], { type: mimeType });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

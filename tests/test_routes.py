@@ -1,6 +1,7 @@
 """Tests for Flask routes."""
 
 import json
+from unittest.mock import patch, MagicMock
 
 
 class TestIndexRoute:
@@ -183,6 +184,131 @@ class TestPathSelection:
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
+
+
+class TestApiFetch:
+    def _mock_response(self, json_data, status_code=200):
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        content = json.dumps(json_data).encode()
+        mock_resp.iter_content.return_value = [content]
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_api_fetch_success(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_get.return_value = self._mock_response([{'id': 1}, {'id': 2}])
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'https://api.example.com/data'
+        })
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['total_rows'] == 2
+        # Verify allow_redirects=False is passed
+        _, kwargs = mock_get.call_args
+        assert kwargs['allow_redirects'] is False
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_api_fetch_timeout(self, mock_validate, mock_get, client):
+        import requests as req
+        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_get.side_effect = req.exceptions.Timeout('timed out')
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'https://api.example.com/data'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'timed out' in data['error'].lower()
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_api_fetch_non_json(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'<html>not json</html>']
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'https://api.example.com/data'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'not valid JSON' in data['error']
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_api_fetch_max_size_exceeded(self, mock_validate, mock_get, client, app):
+        mock_validate.return_value = (True, None, '93.184.216.34')
+        app.config['API_FETCH_MAX_RESPONSE'] = 100  # 100 bytes
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'x' * 200]
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'https://api.example.com/data'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'exceeds maximum size' in data['error']
+
+    @patch('routes.validate_url')
+    def test_api_fetch_ssrf_blocked(self, mock_validate, client):
+        mock_validate.return_value = (False, 'URLs pointing to private or internal networks are not allowed', None)
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'http://169.254.169.254/metadata'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'private' in data['error'].lower()
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_api_fetch_request_error_no_leak(self, mock_validate, mock_get, client):
+        import requests as req
+        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_get.side_effect = req.exceptions.ConnectionError(
+            'Connection to secret-internal-host:8080 refused'
+        )
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'https://api.example.com/data'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        # Should NOT leak the internal connection details
+        assert 'secret-internal-host' not in data['error']
+        assert data['error'] == 'API request failed'
+
+
+class TestFileUploadEncoding:
+    def test_non_utf8_file_returns_400(self, client):
+        import io
+        # Latin-1 encoded content with bytes invalid in UTF-8
+        content = b'\xff\xfe This is not valid UTF-8'
+        data = {
+            'input_method': 'file',
+            'json_file': (io.BytesIO(content), 'test.json')
+        }
+        response = client.post('/process', data=data, content_type='multipart/form-data')
+        assert response.status_code == 400
+        result = json.loads(response.data)
+        assert 'UTF-8' in result['error']
 
 
 class TestExportEdgeCases:
