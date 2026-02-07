@@ -164,12 +164,42 @@ No linting tools currently configured. Recommended: `ruff` for linting + formatt
 
 ## Deployment
 
-Deployed to **Render.com** via `render.yaml` blueprint:
+### Production Requirements (All Methods)
+
+- Set `SECRET_KEY` to a random value (never use the dev default)
+- Set `FLASK_DEBUG=0`
+- Use HTTPS (TLS termination via Nginx, cloud provider, or reverse proxy)
+
+### Render.com (PaaS)
+
+Configured via `render.yaml` blueprint:
 - Runtime: Python 3.11
 - Build: `pip install -r requirements.txt`
 - Start: `gunicorn "app:create_app()" --bind 0.0.0.0:$PORT`
 - Auto-deploy on push, free tier, no persistent storage
-- Set `SECRET_KEY` env var in production
+
+### Own Server (Gunicorn + Systemd + Nginx)
+
+Direct deployment on any Linux server:
+
+1. **Gunicorn** runs the app: `gunicorn "app:create_app()" --bind 127.0.0.1:8000 --workers 4`
+2. **Systemd** manages the process (auto-restart, boot start) — see `README.md` for unit file
+3. **Nginx** reverse proxy handles TLS termination and serves `/static/` files directly
+
+Key config: bind gunicorn to `127.0.0.1` (not `0.0.0.0`) when behind Nginx.
+
+### Docker
+
+```bash
+docker build -t json-table-tool .
+docker run -p 8000:8000 -e SECRET_KEY="..." json-table-tool
+```
+
+Note: no `Dockerfile` is checked in yet — see `README.md` for the Dockerfile and docker-compose.yml templates. The gunicorn command must use `"app:create_app()"` (app factory pattern).
+
+### Other PaaS
+
+Railway.app and Fly.io are also supported — see `README.md` for CLI commands.
 
 ## Common Tasks
 
