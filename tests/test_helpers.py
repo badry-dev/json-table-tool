@@ -1,7 +1,7 @@
 """Tests for data processing helpers."""
 
 import json
-from helpers import flatten_for_csv, extract_table_data, get_all_columns
+from helpers import flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl
 
 
 class TestFlattenForCsv:
@@ -76,6 +76,32 @@ class TestExtractTableData:
 
     def test_non_dict_non_list(self):
         assert extract_table_data("hello") == []
+
+
+class TestParseJsonl:
+    def test_basic_jsonl(self):
+        text = '{"id": 1}\n{"id": 2}\n{"id": 3}'
+        result = parse_jsonl(text)
+        assert len(result) == 3
+        assert result[0] == {"id": 1}
+
+    def test_empty_lines_skipped(self):
+        text = '{"a": 1}\n\n{"a": 2}\n'
+        result = parse_jsonl(text)
+        assert len(result) == 2
+
+    def test_empty_input(self):
+        assert parse_jsonl('') == []
+
+    def test_invalid_line_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match='line 2'):
+            parse_jsonl('{"a": 1}\n{bad json}\n{"a": 3}')
+
+    def test_mixed_objects(self):
+        text = '{"name": "Alice", "age": 30}\n{"name": "Bob", "age": 25}'
+        result = parse_jsonl(text)
+        assert result[1]['name'] == 'Bob'
 
 
 class TestGetAllColumns:

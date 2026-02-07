@@ -22,9 +22,23 @@ const rowCountText = document.getElementById('rowCountText');
 const previewBadge = document.getElementById('previewBadge');
 const exportBtn = document.getElementById('exportBtn');
 
-// Store data for export
+// Store data for export and sorting
 let csvData = null;
 let csvColumns = null;
+let currentColumns = null;
+let currentRows = null;
+let currentTotalRows = 0;
+let sortColumn = null;
+let sortDirection = 'asc';
+
+// Format toggle
+document.querySelectorAll('.format-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.format-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('dataFormat').value = btn.dataset.format;
+    });
+});
 
 // Method tab switching
 methodTabs.forEach(tab => {
@@ -127,14 +141,26 @@ form.addEventListener('submit', async (e) => {
 
 // Render table
 function renderTable(columns, rows, totalRows) {
+    currentColumns = columns;
+    currentRows = rows;
+    currentTotalRows = totalRows;
+    renderTableDOM(columns, rows, totalRows);
+}
+
+function renderTableDOM(columns, rows, totalRows) {
     tableHead.innerHTML = '';
     tableBody.innerHTML = '';
 
-    // Header
+    // Header with sortable columns
     const headerRow = document.createElement('tr');
     columns.forEach(col => {
         const th = document.createElement('th');
         th.textContent = col;
+        th.classList.add('sortable');
+        if (sortColumn === col) {
+            th.classList.add(sortDirection === 'asc' ? 'sort-asc' : 'sort-desc');
+        }
+        th.addEventListener('click', () => handleSort(col));
         headerRow.appendChild(th);
     });
     tableHead.appendChild(headerRow);
@@ -160,6 +186,39 @@ function renderTable(columns, rows, totalRows) {
         previewBadge.textContent = `Showing all ${totalRows}`;
         previewBadge.classList.add('hidden');
     }
+}
+
+// Column sorting (client-side on preview rows)
+function handleSort(col) {
+    if (sortColumn === col) {
+        sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+        sortColumn = col;
+        sortDirection = 'asc';
+    }
+
+    const sorted = [...currentRows].sort((a, b) => {
+        let valA = a[col];
+        let valB = b[col];
+
+        if (valA === null || valA === undefined) valA = '';
+        if (valB === null || valB === undefined) valB = '';
+
+        if (typeof valA === 'object') valA = JSON.stringify(valA);
+        if (typeof valB === 'object') valB = JSON.stringify(valB);
+
+        if (typeof valA === 'number' && typeof valB === 'number') {
+            return sortDirection === 'asc' ? valA - valB : valB - valA;
+        }
+
+        const strA = String(valA).toLowerCase();
+        const strB = String(valB).toLowerCase();
+        if (strA < strB) return sortDirection === 'asc' ? -1 : 1;
+        if (strA > strB) return sortDirection === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    renderTableDOM(currentColumns, sorted, currentTotalRows);
 }
 
 // Format cell value

@@ -62,6 +62,23 @@ def extract_table_data(json_data):
     return []
 
 
+def parse_jsonl(text):
+    """
+    Parse JSONL (JSON Lines) text into a list of objects.
+    Each non-empty line is parsed as a separate JSON value.
+    """
+    rows = []
+    for i, line in enumerate(text.strip().splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            raise ValueError(f'Invalid JSON on line {i}: {str(e)}')
+    return rows
+
+
 def get_all_columns(data):
     """Get all unique column names from the data, sorted alphabetically."""
     columns = set()

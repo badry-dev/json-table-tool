@@ -9,7 +9,7 @@ from flask import Blueprint, render_template, request, jsonify, Response, curren
 
 from extensions import limiter
 from security import validate_url
-from helpers import flatten_for_csv, extract_table_data, get_all_columns
+from helpers import flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl
 
 bp = Blueprint('main', __name__)
 
@@ -37,6 +37,8 @@ def process_json():
         input_method = request.form.get('input_method')
         json_data = None
 
+        data_format = request.form.get('data_format', 'json')
+
         if input_method == 'file':
             if 'json_file' not in request.files:
                 return jsonify({'error': 'No file uploaded'}), 400
@@ -44,18 +46,25 @@ def process_json():
             if file.filename == '':
                 return jsonify({'error': 'No file selected'}), 400
             try:
-                json_data = json.load(file)
-            except json.JSONDecodeError as e:
-                return jsonify({'error': f'Invalid JSON in file: {str(e)}'}), 400
+                content = file.read().decode('utf-8')
+                if data_format == 'jsonl':
+                    json_data = parse_jsonl(content)
+                else:
+                    json_data = json.loads(content)
+            except (json.JSONDecodeError, ValueError) as e:
+                return jsonify({'error': f'Invalid data in file: {str(e)}'}), 400
 
         elif input_method == 'paste':
             pasted_json = request.form.get('pasted_json', '').strip()
             if not pasted_json:
                 return jsonify({'error': 'No JSON provided'}), 400
             try:
-                json_data = json.loads(pasted_json)
-            except json.JSONDecodeError as e:
-                return jsonify({'error': f'Invalid JSON: {str(e)}'}), 400
+                if data_format == 'jsonl':
+                    json_data = parse_jsonl(pasted_json)
+                else:
+                    json_data = json.loads(pasted_json)
+            except (json.JSONDecodeError, ValueError) as e:
+                return jsonify({'error': f'Invalid data: {str(e)}'}), 400
 
         elif input_method == 'api':
             api_url = request.form.get('api_url', '').strip()

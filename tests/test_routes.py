@@ -81,6 +81,30 @@ class TestProcessRoute:
         result = json.loads(response.data)
         assert result['success'] is True
 
+    def test_jsonl_paste(self, client):
+        jsonl_content = '{"id": 1, "name": "Alice"}\n{"id": 2, "name": "Bob"}'
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': jsonl_content,
+            'data_format': 'jsonl'
+        })
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['total_rows'] == 2
+
+    def test_jsonl_file_upload(self, client):
+        import io
+        jsonl_content = '{"a": 1}\n{"a": 2}\n{"a": 3}'
+        data = {
+            'input_method': 'file',
+            'data_format': 'jsonl',
+            'json_file': (io.BytesIO(jsonl_content.encode()), 'test.jsonl')
+        }
+        response = client.post('/process', data=data, content_type='multipart/form-data')
+        result = json.loads(response.data)
+        assert result['success'] is True
+        assert result['total_rows'] == 3
+
     def test_preview_limit(self, client, app):
         app.config['PREVIEW_ROW_LIMIT'] = 5
         rows = json.dumps([{"id": i} for i in range(20)])
