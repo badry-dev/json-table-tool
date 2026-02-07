@@ -142,6 +142,49 @@ class TestExportCsvRoute:
         assert response.status_code == 400
 
 
+class TestExportXlsxRoute:
+    def test_export_xlsx(self, client):
+        response = client.post('/export-xlsx',
+            data=json.dumps({
+                'csv_data': [{'a': 1, 'b': 2}],
+                'csv_columns': ['a', 'b']
+            }),
+            content_type='application/json'
+        )
+        assert response.status_code == 200
+        assert 'spreadsheetml' in response.content_type
+
+    def test_export_xlsx_empty(self, client):
+        response = client.post('/export-xlsx',
+            data=json.dumps({'csv_data': [], 'csv_columns': []}),
+            content_type='application/json'
+        )
+        assert response.status_code == 400
+
+
+class TestPathSelection:
+    def test_multiple_arrays_returns_candidates(self, client):
+        multi = json.dumps({"users": [{"n": "A"}], "orders": [{"id": 1}]})
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': multi
+        })
+        data = json.loads(response.data)
+        assert data.get('needs_selection') is True
+        assert len(data['candidates']) == 2
+
+    def test_path_selection(self, client):
+        multi = json.dumps({"users": [{"n": "A"}], "orders": [{"id": 1}, {"id": 2}]})
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': multi,
+            'json_path': 'orders'
+        })
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['total_rows'] == 2
+
+
 class TestSecurityHeaders:
     def test_csp_header(self, client):
         response = client.get('/')

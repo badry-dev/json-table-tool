@@ -101,16 +101,26 @@ function updateFileName() {
     }
 }
 
+// Store last FormData for re-submission with json_path
+let lastFormData = null;
+
 // Form submission
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    await submitForm();
+});
 
+async function submitForm(jsonPath) {
     hideError();
     showLoading();
     hideResults();
 
     const formData = new FormData(form);
     formData.append('csrf_token', csrfToken);
+    if (jsonPath) {
+        formData.append('json_path', jsonPath);
+    }
+    lastFormData = formData;
 
     try {
         const response = await fetch('/process', {
@@ -120,15 +130,19 @@ form.addEventListener('submit', async (e) => {
 
         const data = await response.json();
 
+        if (data.needs_selection) {
+            hideLoading();
+            showPathSelector(data.candidates);
+            return;
+        }
+
         if (!response.ok || data.error) {
             throw new Error(data.error || 'An error occurred');
         }
 
-        // Store for export
         csvData = data.csv_data;
         csvColumns = data.csv_columns;
 
-        // Render table
         renderTable(data.columns, data.preview, data.total_rows);
         showResults();
 
@@ -136,6 +150,33 @@ form.addEventListener('submit', async (e) => {
         showError(err.message);
     } finally {
         hideLoading();
+    }
+}
+
+// Path selector modal
+function showPathSelector(candidates) {
+    const list = document.getElementById('candidatesList');
+    list.innerHTML = '';
+    candidates.forEach(c => {
+        const item = document.createElement('div');
+        item.classList.add('candidate-item');
+        item.innerHTML = `
+            <div class="candidate-path">${escapeHtml(c.path)}</div>
+            <div class="candidate-meta">${c.length} rows &middot; Keys: ${c.sample_keys.map(k => escapeHtml(k)).join(', ')}</div>
+        `;
+        item.addEventListener('click', () => {
+            document.getElementById('pathModal').classList.remove('visible');
+            submitForm(c.path);
+        });
+        list.appendChild(item);
+    });
+    document.getElementById('pathModal').classList.add('visible');
+}
+
+// Close modal on overlay click
+document.getElementById('pathModal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+        e.currentTarget.classList.remove('visible');
     }
 });
 
@@ -305,15 +346,75 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Export CSV
-exportBtn.addEventListener('click', async () => {
-    if (!csvData || !csvColumns) {
-        showError('No data to export');
-        return;
-    }
+// Export dropdown toggle
+const exportDropdown = document.getElementById('exportDropdown');
+exportBtn.addEventListener('click', () => {
+    exportDropdown.classList.toggle('visible');
+});
 
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.export-group')) {
+        exportDropdown.classList.remove('visible');
+    }
+});
+
+// Export handlers
+document.querySelectorAll('.export-dropdown-item').forEach(item => {
+    item.addEventListener('click', async () => {
+        exportDropdown.classList.remove('visible');
+        const format = item.dataset.format;
+
+        if (!csvData || !csvColumns) {
+            showError('No data to export');
+            return;
+        }
+
+        if (format === 'csv') {
+            downloadDelimited(csvColumns, csvData, ',', 'exported_data.csv');
+        } else if (format === 'tsv') {
+            downloadDelimited(csvColumns, csvData, '\t', 'exported_data.tsv');
+        } else if (format === 'xlsx') {
+            await exportXlsx();
+        }
+    });
+});
+
+// Client-side CSV/TSV generation
+function downloadDelimited(columns, data, delimiter, filename) {
+    const escape = (val) => {
+        const str = String(val ?? '');
+        if (str.includes(delimiter) || str.includes('"') || str.includes('\n')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
+    };
+
+    let output = columns.map(escape).join(delimiter) + '\n';
+    data.forEach(row => {
+        const line = columns.map(col => {
+            let v = row[col];
+            if (typeof v === 'object' && v !== null) v = JSON.stringify(v);
+            return escape(v);
+        }).join(delimiter);
+        output += line + '\n';
+    });
+
+    const blob = new Blob([output], { type: 'text/plain;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    a.remove();
+}
+
+// Server-side Excel export (needs openpyxl)
+async function exportXlsx() {
     try {
-        const response = await fetch('/export-csv', {
+        const response = await fetch('/export-xlsx', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -325,23 +426,50 @@ exportBtn.addEventListener('click', async () => {
             })
         });
 
-        if (!response.ok) {
-            throw new Error('Export failed');
-        }
+        if (!response.ok) throw new Error('Excel export failed');
 
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'exported_data.csv';
+        a.download = 'exported_data.xlsx';
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
         a.remove();
-
     } catch (err) {
         showError(err.message);
     }
+}
+
+// Theme toggle
+const themeToggle = document.getElementById('themeToggle');
+const sunPath = 'M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z';
+const moonPath = 'M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z';
+
+function applyTheme(theme) {
+    if (theme === 'light') {
+        document.documentElement.classList.add('light');
+        document.getElementById('themeIcon').querySelector('path').setAttribute('d', moonPath);
+    } else {
+        document.documentElement.classList.remove('light');
+        document.getElementById('themeIcon').querySelector('path').setAttribute('d', sunPath);
+    }
+}
+
+function getPreferredTheme() {
+    const saved = localStorage.getItem('theme');
+    if (saved) return saved;
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+applyTheme(getPreferredTheme());
+
+themeToggle.addEventListener('click', () => {
+    const current = document.documentElement.classList.contains('light') ? 'light' : 'dark';
+    const next = current === 'light' ? 'dark' : 'light';
+    localStorage.setItem('theme', next);
+    applyTheme(next);
 });
 
 // About link

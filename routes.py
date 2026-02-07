@@ -9,7 +9,10 @@ from flask import Blueprint, render_template, request, jsonify, Response, curren
 
 from extensions import limiter
 from security import validate_url
-from helpers import flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl
+from helpers import (
+    flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl,
+    find_candidate_arrays, extract_by_path
+)
 
 bp = Blueprint('main', __name__)
 
@@ -134,7 +137,25 @@ def process_json():
         else:
             return jsonify({'error': 'Invalid input method'}), 400
 
-        table_data = extract_table_data(json_data)
+        # Check if user selected a specific JSON path
+        json_path = request.form.get('json_path', '')
+
+        if json_path:
+            selected = extract_by_path(json_data, json_path)
+            if selected and isinstance(selected, list):
+                table_data = extract_table_data(selected)
+            else:
+                return jsonify({'error': f'Path "{json_path}" not found or not an array'}), 400
+        else:
+            # Check for multiple candidate arrays
+            candidates = find_candidate_arrays(json_data)
+            if len(candidates) > 1:
+                return jsonify({
+                    'needs_selection': True,
+                    'candidates': candidates
+                })
+            table_data = extract_table_data(json_data)
+
         if not table_data:
             return jsonify({'error': 'Could not extract tabular data from JSON'}), 400
 
@@ -191,6 +212,53 @@ def export_csv():
             headers={
                 'Content-Disposition': 'attachment; filename=exported_data.csv',
                 'Content-Type': 'text/csv; charset=utf-8'
+            }
+        )
+
+    except Exception as e:
+        return jsonify({'error': f'Export failed: {str(e)}'}), 500
+
+
+@bp.route('/export-xlsx', methods=['POST'])
+@limiter.limit(lambda: current_app.config.get('RATE_LIMIT_EXPORT', '60/minute'))
+def export_xlsx():
+    """Export data as Excel file."""
+    try:
+        from openpyxl import Workbook
+
+        data = request.json
+        xlsx_data = data.get('csv_data', [])
+        xlsx_columns = data.get('csv_columns', [])
+
+        if not xlsx_data:
+            return jsonify({'error': 'No data to export'}), 400
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Data'
+
+        # Header row
+        ws.append(xlsx_columns)
+
+        # Data rows
+        for row in xlsx_data:
+            row_values = []
+            for col in xlsx_columns:
+                v = row.get(col, '')
+                if isinstance(v, (dict, list)):
+                    v = json.dumps(v)
+                row_values.append(v)
+            ws.append(row_values)
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return Response(
+            output.getvalue(),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={
+                'Content-Disposition': 'attachment; filename=exported_data.xlsx',
             }
         )
 
