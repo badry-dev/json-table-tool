@@ -185,6 +185,30 @@ class TestPathSelection:
         assert data['total_rows'] == 2
 
 
+class TestExportEdgeCases:
+    def test_export_csv_no_json_body(self, client):
+        response = client.post('/export-csv', data='not json',
+                               content_type='application/json')
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'Invalid or missing' in data['error']
+
+    def test_export_xlsx_no_json_body(self, client):
+        response = client.post('/export-xlsx', data='not json',
+                               content_type='application/json')
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'Invalid or missing' in data['error']
+
+    def test_export_csv_no_content_type(self, client):
+        response = client.post('/export-csv', data='hello')
+        assert response.status_code == 400
+
+    def test_export_xlsx_no_content_type(self, client):
+        response = client.post('/export-xlsx', data='hello')
+        assert response.status_code == 400
+
+
 class TestSecurityHeaders:
     def test_csp_header(self, client):
         response = client.get('/')

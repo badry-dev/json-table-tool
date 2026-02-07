@@ -3,6 +3,7 @@
 import json
 import csv
 import io
+import logging
 import requests
 from requests.auth import HTTPBasicAuth
 from flask import Blueprint, render_template, request, jsonify, Response, current_app
@@ -13,6 +14,8 @@ from helpers import (
     flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl,
     find_candidate_arrays, extract_by_path
 )
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('main', __name__)
 
@@ -74,7 +77,7 @@ def process_json():
             if not api_url:
                 return jsonify({'error': 'No API URL provided'}), 400
 
-            is_valid, error_msg = validate_url(api_url)
+            is_valid, error_msg, resolved_ip = validate_url(api_url)
             if not is_valid:
                 return jsonify({'error': error_msg}), 400
 
@@ -107,31 +110,43 @@ def process_json():
                 timeout = current_app.config['API_FETCH_TIMEOUT']
                 max_size = current_app.config['API_FETCH_MAX_RESPONSE']
 
+                # Pin to the resolved IP to prevent DNS rebinding,
+                # and disable redirects to prevent SSRF bypass
+                from urllib.parse import urlparse, urlunparse
+                parsed_api = urlparse(api_url)
+                headers['Host'] = parsed_api.hostname
+                pinned_url = urlunparse(parsed_api._replace(
+                    netloc=resolved_ip + (f':{parsed_api.port}' if parsed_api.port else '')
+                ))
+
                 resp = requests.get(
-                    api_url,
+                    pinned_url,
                     headers=headers,
                     auth=auth,
                     params=params,
                     timeout=timeout,
-                    stream=True
+                    stream=True,
+                    allow_redirects=False,
+                    verify=True
                 )
                 resp.raise_for_status()
 
-                content = b''
+                content = bytearray()
                 for chunk in resp.iter_content(chunk_size=8192):
-                    content += chunk
+                    content.extend(chunk)
                     if len(content) > max_size:
                         return jsonify({
                             'error': f'API response exceeds maximum size '
                                      f'({max_size // (1024 * 1024)}MB)'
                         }), 400
 
-                json_data = json.loads(content)
+                json_data = json.loads(bytes(content))
 
             except requests.exceptions.Timeout:
                 return jsonify({'error': 'API request timed out'}), 400
             except requests.exceptions.RequestException as e:
-                return jsonify({'error': f'API request failed: {str(e)}'}), 400
+                logger.warning('API request failed: %s', e)
+                return jsonify({'error': 'API request failed'}), 400
             except json.JSONDecodeError:
                 return jsonify({'error': 'API response is not valid JSON'}), 400
         else:
@@ -142,7 +157,7 @@ def process_json():
 
         if json_path:
             selected = extract_by_path(json_data, json_path)
-            if selected and isinstance(selected, list):
+            if selected is not None and isinstance(selected, list):
                 table_data = extract_table_data(selected)
             else:
                 return jsonify({'error': f'Path "{json_path}" not found or not an array'}), 400
@@ -177,7 +192,8 @@ def process_json():
         })
 
     except Exception as e:
-        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+        logger.exception('Unexpected error in process_json')
+        return jsonify({'error': 'An internal error occurred'}), 500
 
 
 @bp.route('/export-csv', methods=['POST'])
@@ -185,7 +201,10 @@ def process_json():
 def export_csv():
     """Export data as CSV file."""
     try:
-        data = request.json
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({'error': 'Invalid or missing JSON body'}), 400
+
         csv_data = data.get('csv_data', [])
         csv_columns = data.get('csv_columns', [])
 
@@ -216,7 +235,8 @@ def export_csv():
         )
 
     except Exception as e:
-        return jsonify({'error': f'Export failed: {str(e)}'}), 500
+        logger.exception('Unexpected error in export_csv')
+        return jsonify({'error': 'Export failed'}), 500
 
 
 @bp.route('/export-xlsx', methods=['POST'])
@@ -226,7 +246,10 @@ def export_xlsx():
     try:
         from openpyxl import Workbook
 
-        data = request.json
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({'error': 'Invalid or missing JSON body'}), 400
+
         xlsx_data = data.get('csv_data', [])
         xlsx_columns = data.get('csv_columns', [])
 
@@ -263,4 +286,5 @@ def export_xlsx():
         )
 
     except Exception as e:
-        return jsonify({'error': f'Export failed: {str(e)}'}), 500
+        logger.exception('Unexpected error in export_xlsx')
+        return jsonify({'error': 'Export failed'}), 500
