@@ -111,7 +111,7 @@ git push -u origin main
    - **Branch**: `main`
    - **Runtime**: `Python 3`
    - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `gunicorn app:app --bind 0.0.0.0:$PORT`
+   - **Start Command**: `gunicorn "app:create_app()" --bind 0.0.0.0:$PORT`
 4. Select **Free** plan
 5. Click **"Create Web Service"**
 
@@ -169,30 +169,81 @@ Render's paid tiers support IP allowlisting for stricter access control.
 
 ## Alternative Deployment Options
 
-### Railway.app
+### Self-Hosted with Gunicorn (Recommended for Own Server)
+
+Run directly on any Linux server with Python 3.11+:
 
 ```bash
-# Install Railway CLI
-npm install -g @railway/cli
+# Clone and install
+git clone https://github.com/YOUR_USERNAME/json-table-tool.git
+cd json-table-tool
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-# Login and deploy
-railway login
-railway init
-railway up
+# Set production environment variables
+export SECRET_KEY="your-random-secret-key-here"
+export FLASK_DEBUG=0
+
+# Run with gunicorn
+gunicorn "app:create_app()" --bind 0.0.0.0:8000 --workers 4
 ```
 
-### Fly.io
+#### Systemd Service (Auto-Start on Boot)
+
+Create `/etc/systemd/system/json-table-tool.service`:
+
+```ini
+[Unit]
+Description=JSON Table Converter
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/json-table-tool
+Environment="SECRET_KEY=your-random-secret-key-here"
+Environment="FLASK_DEBUG=0"
+ExecStart=/opt/json-table-tool/venv/bin/gunicorn "app:create_app()" --bind 127.0.0.1:8000 --workers 4
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ```bash
-# Install flyctl
-curl -L https://fly.io/install.sh | sh
-
-# Deploy
-fly launch
-fly deploy
+sudo systemctl enable json-table-tool
+sudo systemctl start json-table-tool
 ```
 
-### Docker (Self-Hosted)
+#### Nginx Reverse Proxy (HTTPS)
+
+Pair with Nginx for TLS termination and static file serving:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name jsontable.yourcompany.com;
+
+    ssl_certificate /etc/letsencrypt/live/jsontable.yourcompany.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/jsontable.yourcompany.com/privkey.pem;
+
+    location /static/ {
+        alias /opt/json-table-tool/static/;
+        expires 1d;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Docker
 
 ```dockerfile
 # Dockerfile
@@ -201,14 +252,70 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-EXPOSE 5000
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000"]
+EXPOSE 8000
+CMD ["gunicorn", "app:create_app()", "--bind", "0.0.0.0:8000", "--workers", "4"]
 ```
 
 ```bash
 docker build -t json-table-tool .
-docker run -p 5000:5000 json-table-tool
+docker run -p 8000:8000 \
+  -e SECRET_KEY="your-random-secret-key-here" \
+  json-table-tool
 ```
+
+#### Docker Compose
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SECRET_KEY=your-random-secret-key-here
+      - FLASK_DEBUG=0
+      - RATE_LIMIT_PROCESS=30/minute
+      - RATE_LIMIT_EXPORT=60/minute
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+```
+
+### Railway.app
+
+```bash
+npm install -g @railway/cli
+railway login
+railway init
+railway up
+```
+
+### Fly.io
+
+```bash
+curl -L https://fly.io/install.sh | sh
+fly launch
+fly deploy
+```
+
+### Environment Variables (All Deployment Methods)
+
+Set these in production for any deployment method:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SECRET_KEY` | **Yes** | `dev-secret-key-...` | CSRF token signing key. Generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `FLASK_DEBUG` | No | `0` | Set to `0` in production |
+| `MAX_UPLOAD_SIZE` | No | `10485760` | Max request body in bytes (10 MB) |
+| `PREVIEW_ROW_LIMIT` | No | `25` | Rows shown in preview table |
+| `API_FETCH_TIMEOUT` | No | `30` | Seconds before API fetch times out |
+| `API_FETCH_MAX_RESPONSE` | No | `10485760` | Max API response size in bytes |
+| `RATE_LIMIT_PROCESS` | No | `30/minute` | Rate limit on /process endpoint |
+| `RATE_LIMIT_EXPORT` | No | `60/minute` | Rate limit on export endpoints |
+| `RATE_LIMIT_DEFAULT` | No | `120/minute` | Default rate limit for all routes |
 
 ---
 
@@ -234,9 +341,12 @@ docker run -p 5000:5000 json-table-tool
   - **Query Param**: Enter parameter name and value
 - Click "Convert to Table"
 
-### 4. Export to CSV
-- After conversion, click "Export CSV"
-- Downloads ALL rows (not just the preview)
+### 4. Export Data
+- After conversion, click **"Export"** to see format options:
+  - **CSV** — Comma-separated values (generated instantly in your browser)
+  - **TSV** — Tab-separated values (generated instantly in your browser)
+  - **Excel** — `.xlsx` file via server-side generation
+- All formats export ALL rows (not just the preview)
 
 ---
 
@@ -280,9 +390,12 @@ docker run -p 5000:5000 json-table-tool
 
 - **No data logging**: Server processes data in memory only
 - **No database**: No persistence layer configured
-- **HTTPS**: Render provides free SSL/TLS
-- **Session isolation**: Each request is independent
-- **Stateless**: Server doesn't maintain session state
+- **CSRF protection**: All POST routes protected via Flask-WTF tokens
+- **SSRF prevention**: API fetch validates DNS, blocks private/internal IPs
+- **Rate limiting**: Configurable per-route rate limits (Flask-Limiter)
+- **Security headers**: CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- **HTTPS**: Render provides free SSL/TLS; use Nginx/Let's Encrypt for self-hosted
+- **Stateless**: Each request is independent, no session state
 
 ---
 
@@ -312,8 +425,8 @@ docker run -p 5000:5000 json-table-tool
 export FLASK_DEBUG=1
 python app.py
 
-# Run tests (if added)
-python -m pytest tests/
+# Run tests
+python -m pytest tests/ -v
 ```
 
 ---
