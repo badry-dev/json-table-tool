@@ -78,6 +78,7 @@ body::before {
     max-width: 1200px;
     margin: 0 auto;
     padding: 40px 24px;
+    position: relative;
 }
 
 /* Header */
@@ -848,6 +849,3 @@ th.sort-desc::after {
     margin-top: 4px;
 }
 
-.container {
-    position: relative;
-}

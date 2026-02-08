@@ -9,24 +9,23 @@ def validate_url(url):
     """
     Validate a URL for SSRF protection.
     Resolves DNS and rejects non-global IPs.
-    Returns (is_valid, error_message_or_none, resolved_ip_or_none).
-    The resolved IP should be used for the actual request to prevent DNS rebinding.
+    Returns (is_valid, error_message_or_none).
     """
     parsed = urlparse(url)
 
     if parsed.scheme not in ('http', 'https'):
-        return False, 'Only HTTP and HTTPS URLs are allowed', None
+        return False, 'Only HTTP and HTTPS URLs are allowed'
 
     hostname = parsed.hostname
     if not hostname:
-        return False, 'Invalid URL: no hostname', None
+        return False, 'Invalid URL: no hostname'
 
     try:
         addr_infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
-        return False, f'Could not resolve hostname: {hostname}', None
+        return False, f'Could not resolve hostname: {hostname}'
 
-    resolved_ip = None
+    found_valid = False
     for addr_info in addr_infos:
         ip_str = addr_info[4][0]
         try:
@@ -34,14 +33,13 @@ def validate_url(url):
         except ValueError:
             continue
         if not ip.is_global or ip.is_multicast:
-            return False, 'URLs pointing to private or internal networks are not allowed', None
-        if resolved_ip is None:
-            resolved_ip = ip_str
+            return False, 'URLs pointing to private or internal networks are not allowed'
+        found_valid = True
 
-    if resolved_ip is None:
-        return False, 'Could not resolve any valid IP addresses', None
+    if not found_valid:
+        return False, 'Could not resolve any valid IP addresses'
 
-    return True, None, resolved_ip
+    return True, None
 
 
 def apply_security_headers(response):

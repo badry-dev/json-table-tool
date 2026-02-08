@@ -20,11 +20,11 @@ class TestHealthRoute:
         data = json.loads(response.data)
         assert data['status'] == 'ok'
 
-    def test_returns_version(self, client):
+    def test_returns_version(self, client, app):
         response = client.get('/health')
         data = json.loads(response.data)
         assert 'version' in data
-        assert data['version'] == '1.1.0'
+        assert data['version'] == app.config['APP_VERSION']
 
 
 class TestProcessRoute:
@@ -198,7 +198,7 @@ class TestApiFetch:
     @patch('routes.requests.get')
     @patch('routes.validate_url')
     def test_api_fetch_success(self, mock_validate, mock_get, client):
-        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_validate.return_value = (True, None)
         mock_get.return_value = self._mock_response([{'id': 1}, {'id': 2}])
 
         response = client.post('/process', data={
@@ -216,7 +216,7 @@ class TestApiFetch:
     @patch('routes.validate_url')
     def test_api_fetch_timeout(self, mock_validate, mock_get, client):
         import requests as req
-        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_validate.return_value = (True, None)
         mock_get.side_effect = req.exceptions.Timeout('timed out')
 
         response = client.post('/process', data={
@@ -230,7 +230,7 @@ class TestApiFetch:
     @patch('routes.requests.get')
     @patch('routes.validate_url')
     def test_api_fetch_non_json(self, mock_validate, mock_get, client):
-        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_validate.return_value = (True, None)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'<html>not json</html>']
@@ -248,7 +248,7 @@ class TestApiFetch:
     @patch('routes.requests.get')
     @patch('routes.validate_url')
     def test_api_fetch_max_size_exceeded(self, mock_validate, mock_get, client, app):
-        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_validate.return_value = (True, None)
         app.config['API_FETCH_MAX_RESPONSE'] = 100  # 100 bytes
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -266,7 +266,7 @@ class TestApiFetch:
 
     @patch('routes.validate_url')
     def test_api_fetch_ssrf_blocked(self, mock_validate, client):
-        mock_validate.return_value = (False, 'URLs pointing to private or internal networks are not allowed', None)
+        mock_validate.return_value = (False, 'URLs pointing to private or internal networks are not allowed')
 
         response = client.post('/process', data={
             'input_method': 'api',
@@ -278,9 +278,29 @@ class TestApiFetch:
 
     @patch('routes.requests.get')
     @patch('routes.validate_url')
+    def test_api_fetch_jsonl(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        content = b'{"id": 1, "name": "Alice"}\n{"id": 2, "name": "Bob"}'
+        mock_resp.iter_content.return_value = [content]
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = client.post('/process', data={
+            'input_method': 'api',
+            'api_url': 'https://api.example.com/data',
+            'data_format': 'jsonl'
+        })
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['total_rows'] == 2
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
     def test_api_fetch_request_error_no_leak(self, mock_validate, mock_get, client):
         import requests as req
-        mock_validate.return_value = (True, None, '93.184.216.34')
+        mock_validate.return_value = (True, None)
         mock_get.side_effect = req.exceptions.ConnectionError(
             'Connection to secret-internal-host:8080 refused'
         )

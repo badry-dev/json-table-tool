@@ -101,9 +101,6 @@ function updateFileName() {
     }
 }
 
-// Store last FormData for re-submission with json_path
-let lastFormData = null;
-
 // Form submission
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -120,7 +117,6 @@ async function submitForm(jsonPath) {
     if (jsonPath) {
         formData.append('json_path', jsonPath);
     }
-    lastFormData = formData;
 
     try {
         const response = await fetch('/process', {

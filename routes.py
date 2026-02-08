@@ -79,7 +79,7 @@ def process_json():
             if not api_url:
                 return jsonify({'error': 'No API URL provided'}), 400
 
-            is_valid, error_msg, resolved_ip = validate_url(api_url)
+            is_valid, error_msg = validate_url(api_url)
             if not is_valid:
                 return jsonify({'error': error_msg}), 400
 
@@ -136,7 +136,11 @@ def process_json():
                                      f'({max_size // (1024 * 1024)}MB)'
                         }), 400
 
-                json_data = json.loads(bytes(content))
+                text = bytes(content).decode('utf-8')
+                if data_format == 'jsonl':
+                    json_data = parse_jsonl(text)
+                else:
+                    json_data = json.loads(text)
 
             except requests.exceptions.Timeout:
                 return jsonify({'error': 'API request timed out'}), 400
