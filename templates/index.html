@@ -217,12 +217,20 @@
         </footer>
     </div>
 
-    <!-- Path selector modal -->
+    <!-- Path selector modal (JSON tree) -->
     <div class="modal-overlay" id="pathModal">
-        <div class="modal">
-            <div class="modal-title">Multiple arrays found</div>
-            <div class="modal-subtitle">Select which data to display as a table:</div>
-            <div id="candidatesList"></div>
+        <div class="modal modal-tree">
+            <div class="modal-title">Choose JSON level for the table</div>
+            <div class="modal-subtitle">
+                Click any <strong>array</strong> or <strong>object</strong> node to build the table from it.
+                Arrays of objects become multi-row tables; a single object becomes a one-row table.
+            </div>
+            <div class="tree-container" id="treeContainer"></div>
+            <div class="modal-actions">
+                <div class="tree-selected" id="treeSelected">No node selected</div>
+                <button type="button" class="btn btn-secondary" id="treeCancel">Cancel</button>
+                <button type="button" class="btn btn-primary" id="treeConfirm" disabled>Generate table</button>
+            </div>
         </div>
     </div>
 

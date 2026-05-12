@@ -849,3 +849,108 @@ th.sort-desc::after {
     margin-top: 4px;
 }
 
+/* JSON tree picker */
+.modal-tree {
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+}
+
+.tree-container {
+    flex: 1;
+    min-height: 240px;
+    max-height: 50vh;
+    overflow: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+}
+
+.tree-node {
+    display: block;
+}
+
+.tree-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    line-height: 1.5;
+}
+
+.tree-row.tree-selectable {
+    cursor: pointer;
+}
+
+.tree-row.tree-selectable:hover {
+    background: var(--bg-tertiary);
+}
+
+.tree-row.selected {
+    background: var(--accent-primary);
+    color: #fff;
+}
+
+.tree-row.selected .tree-key,
+.tree-row.selected .tree-type {
+    color: inherit;
+}
+
+.tree-toggle {
+    display: inline-block;
+    width: 14px;
+    text-align: center;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+.tree-row.tree-selectable .tree-toggle {
+    cursor: pointer;
+}
+
+.tree-key {
+    color: var(--accent-primary);
+    font-weight: 600;
+}
+
+.tree-type {
+    color: var(--text-muted);
+}
+
+.tree-children {
+    margin-left: 18px;
+    border-left: 1px dashed var(--border-color);
+    padding-left: 8px;
+}
+
+.tree-children.hidden {
+    display: none;
+}
+
+.tree-more {
+    padding: 2px 6px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.modal-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.tree-selected {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+

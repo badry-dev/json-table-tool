@@ -31,7 +31,8 @@ class TestProcessRoute:
     def test_paste_valid_json(self, client):
         response = client.post('/process', data={
             'input_method': 'paste',
-            'pasted_json': '[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]'
+            'pasted_json': '[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]',
+            'json_path': '(root)'
         })
         data = json.loads(response.data)
         assert data['success'] is True
@@ -65,17 +66,28 @@ class TestProcessRoute:
         nested = json.dumps({"data": [{"x": 1}, {"x": 2}]})
         response = client.post('/process', data={
             'input_method': 'paste',
-            'pasted_json': nested
+            'pasted_json': nested,
+            'json_path': 'data'
         })
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
+
+    def test_no_path_returns_tree_payload(self, client):
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': '[{"id": 1}, {"id": 2}]'
+        })
+        data = json.loads(response.data)
+        assert data.get('needs_selection') is True
+        assert data['raw_json'] == [{"id": 1}, {"id": 2}]
 
     def test_file_upload(self, client):
         import io
         json_content = json.dumps([{"a": 1}])
         data = {
             'input_method': 'file',
+            'json_path': '(root)',
             'json_file': (io.BytesIO(json_content.encode()), 'test.json')
         }
         response = client.post('/process', data=data, content_type='multipart/form-data')
@@ -87,7 +99,8 @@ class TestProcessRoute:
         response = client.post('/process', data={
             'input_method': 'paste',
             'pasted_json': jsonl_content,
-            'data_format': 'jsonl'
+            'data_format': 'jsonl',
+            'json_path': '(root)'
         })
         data = json.loads(response.data)
         assert data['success'] is True
@@ -99,6 +112,7 @@ class TestProcessRoute:
         data = {
             'input_method': 'file',
             'data_format': 'jsonl',
+            'json_path': '(root)',
             'json_file': (io.BytesIO(jsonl_content.encode()), 'test.jsonl')
         }
         response = client.post('/process', data=data, content_type='multipart/form-data')
@@ -111,7 +125,8 @@ class TestProcessRoute:
         rows = json.dumps([{"id": i} for i in range(20)])
         response = client.post('/process', data={
             'input_method': 'paste',
-            'pasted_json': rows
+            'pasted_json': rows,
+            'json_path': '(root)'
         })
         data = json.loads(response.data)
         assert data['total_rows'] == 20
@@ -164,15 +179,15 @@ class TestExportXlsxRoute:
 
 
 class TestPathSelection:
-    def test_multiple_arrays_returns_candidates(self, client):
-        multi = json.dumps({"users": [{"n": "A"}], "orders": [{"id": 1}]})
+    def test_no_path_returns_raw_json_for_tree(self, client):
+        payload = {"users": [{"n": "A"}], "orders": [{"id": 1}]}
         response = client.post('/process', data={
             'input_method': 'paste',
-            'pasted_json': multi
+            'pasted_json': json.dumps(payload)
         })
         data = json.loads(response.data)
         assert data.get('needs_selection') is True
-        assert len(data['candidates']) == 2
+        assert data['raw_json'] == payload
 
     def test_path_selection(self, client):
         multi = json.dumps({"users": [{"n": "A"}], "orders": [{"id": 1}, {"id": 2}]})
@@ -184,6 +199,51 @@ class TestPathSelection:
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
+
+    def test_path_to_array_index_object(self, client):
+        payload = json.dumps({"data": [{"id": 1, "orders": [{"x": 1}, {"x": 2}]}]})
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': payload,
+            'json_path': 'data.0.orders'
+        })
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['total_rows'] == 2
+
+    def test_path_to_single_object_becomes_one_row(self, client):
+        payload = json.dumps({"meta": {"version": 3, "name": "x"}})
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': payload,
+            'json_path': 'meta'
+        })
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['total_rows'] == 1
+        assert 'version' in data['columns']
+
+    def test_path_to_primitive_rejected(self, client):
+        payload = json.dumps({"a": 1})
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': payload,
+            'json_path': 'a'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'primitive' in data['error']
+
+    def test_invalid_path_rejected(self, client):
+        payload = json.dumps({"a": {"b": 1}})
+        response = client.post('/process', data={
+            'input_method': 'paste',
+            'pasted_json': payload,
+            'json_path': 'a.c'
+        })
+        assert response.status_code == 400
+        data = json.loads(response.data)
+        assert 'not found' in data['error']
 
 
 class TestApiFetch:
@@ -203,7 +263,8 @@ class TestApiFetch:
 
         response = client.post('/process', data={
             'input_method': 'api',
-            'api_url': 'https://api.example.com/data'
+            'api_url': 'https://api.example.com/data',
+            'json_path': '(root)'
         })
         data = json.loads(response.data)
         assert data['success'] is True
@@ -290,7 +351,8 @@ class TestApiFetch:
         response = client.post('/process', data={
             'input_method': 'api',
             'api_url': 'https://api.example.com/data',
-            'data_format': 'jsonl'
+            'data_format': 'jsonl',
+            'json_path': '(root)'
         })
         data = json.loads(response.data)
         assert data['success'] is True

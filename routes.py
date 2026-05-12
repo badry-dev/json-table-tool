@@ -12,7 +12,7 @@ from extensions import limiter
 from security import validate_url
 from helpers import (
     flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl,
-    find_candidate_arrays, extract_by_path
+    extract_by_path
 )
 
 logger = logging.getLogger(__name__)
@@ -157,19 +157,22 @@ def process_json():
 
         if json_path:
             selected = extract_by_path(json_data, json_path)
-            if selected is not None and isinstance(selected, list):
+            if selected is None:
+                return jsonify({'error': f'Path "{json_path}" not found'}), 400
+            if isinstance(selected, list):
                 table_data = extract_table_data(selected)
+            elif isinstance(selected, dict):
+                table_data = [selected]
             else:
-                return jsonify({'error': f'Path "{json_path}" not found or not an array'}), 400
-        else:
-            # Check for multiple candidate arrays
-            candidates = find_candidate_arrays(json_data)
-            if len(candidates) > 1:
                 return jsonify({
-                    'needs_selection': True,
-                    'candidates': candidates
-                })
-            table_data = extract_table_data(json_data)
+                    'error': f'Path "{json_path}" is a primitive value; pick an object or array'
+                }), 400
+        else:
+            # No path chosen yet — let the client render a tree picker
+            return jsonify({
+                'needs_selection': True,
+                'raw_json': json_data
+            })
 
         if not table_data:
             return jsonify({'error': 'Could not extract tabular data from JSON'}), 400

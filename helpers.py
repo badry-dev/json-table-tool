@@ -112,7 +112,10 @@ def find_candidate_arrays(json_data, prefix='', candidates=None):
 
 
 def extract_by_path(json_data, path):
-    """Extract data from JSON using a dot-notation path."""
+    """
+    Extract data from JSON using a dot-notation path.
+    Numeric parts traverse arrays (e.g. 'data.0.orders').
+    """
     if path == '(root)':
         return json_data
 
@@ -121,6 +124,15 @@ def extract_by_path(json_data, path):
     for part in parts:
         if isinstance(current, dict) and part in current:
             current = current[part]
+        elif isinstance(current, list):
+            try:
+                idx = int(part)
+            except ValueError:
+                return None
+            if 0 <= idx < len(current):
+                current = current[idx]
+            else:
+                return None
         else:
             return None
     return current

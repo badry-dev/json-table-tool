@@ -147,6 +147,16 @@ class TestExtractByPath:
         data = {"a": 1}
         assert extract_by_path(data, 'b.c') is None
 
+    def test_array_index_in_path(self):
+        data = {"data": [{"orders": [{"x": 1}, {"x": 2}]}, {"orders": []}]}
+        assert extract_by_path(data, 'data.0.orders') == [{"x": 1}, {"x": 2}]
+
+    def test_array_index_out_of_range(self):
+        assert extract_by_path({"a": [1, 2]}, 'a.5') is None
+
+    def test_non_numeric_index_on_array(self):
+        assert extract_by_path({"a": [1, 2]}, 'a.foo') is None
+
 
 class TestGetAllColumns:
     def test_basic(self):
