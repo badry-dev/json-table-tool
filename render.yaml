@@ -9,7 +9,7 @@ services:
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.14.5
     # Free tier settings
     plan: free
     # No persistent disk = no data storage

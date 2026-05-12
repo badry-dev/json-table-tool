@@ -9,7 +9,7 @@ import csv
 import io
 import requests
 from requests.auth import HTTPBasicAuth
-from urllib.parse import urljoin
+#from urllib.parse import urljoin
 
 app = Flask(__name__)
 
