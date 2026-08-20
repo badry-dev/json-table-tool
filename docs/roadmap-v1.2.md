@@ -23,13 +23,14 @@
 
 **v1.2.0** = Security hardening + performance + reliability (Phases 0-3 below) and a small set of low-risk features (Phase 4). Phases 0-3 are designed to be individually shippable; each ends green (full test suite + manual checklist).
 
-**Decision points (need explicit user sign-off before implementation):**
-- **D1.** Allow one new pinned dependency (`Flask-Compress`) or use a ~20-line in-repo gzip middleware? (Recommendation: in-repo middleware — keeps dep count at 7 and honors the "lean deps" value. P1)
+**Decision points.** D1, D2, D3, D5 and D6 are **decided** below and their dependent tasks are committed v1.2 scope. D4 is the only open item; every task and acceptance criterion that depends on it is marked *conditional (D4)* and is dropped without further impact if D4 is declined.
+
+- **D1.** gzip implementation — **decided: in-repo middleware** (~20 lines, no new pinned dependency; keeps the dep count at 7 and honors the "lean deps" value). `Flask-Compress` is the documented fallback only if the middleware cannot meet the P1 budget. (P1)
 - **D2.** `find_candidate_arrays` lifecycle — **decided: delete** (it is dead code superseded by the tree picker). Deletion happens in Phase 0, *before* the Phase 1 recursion-guard work, so guards are added only to `extract_table_data` and no guard tests for the deleted function are written. (P10/F8)
-- **D3.** Opt-in `TRUST_PROXY`/`ProxyFix` (recommended, off by default) — never trust `X-Forwarded-For` unconditionally. (F12)
-- **D4.** Opt-in HTTP Basic Auth gate for the whole app via env (`APP_BASIC_AUTH_USER`/`APP_BASIC_AUTH_PASS`, off by default)? This is the internal-tool use case from README §"Access Control". (Recommendation: add it — small, opt-in, no persistence, but it *is* an access-control feature so confirm first.)
-- **D5.** Port allowlist for API fetch: default `80,443,8443` only. (F6.2 — recommendation: yes.)
-- **D6.** Export buffering vs the no-disk-writes rule: openpyxl `write_only` mode and `SpooledTemporaryFile` both rely on OS temp files (transient payload-derived data). Default recommendation: **diskless** — normal-mode `Workbook` + hard `MAX_EXPORT_ROWS` cap (memory-bounded, no temp files); the memory-light temp-file route only under an explicit documented exception. (P3)
+- **D3.** Proxy-aware rate limiting — **decided: opt-in `TRUST_PROXY`/`ProxyFix`, off by default.** `X-Forwarded-For` is never trusted unless `TRUST_PROXY=1` is set; with it unset, behavior is unchanged from v1.1. (F12)
+- **D4.** Opt-in HTTP Basic Auth gate for the whole app via env (`APP_BASIC_AUTH_USER`/`APP_BASIC_AUTH_PASS`, off by default) — **OPEN, needs maintainer sign-off** before Phase 4 starts. It is the internal-tool use case from README §"Access Control" (small, opt-in, no persistence), but it *is* a new access-control surface. **Dependent scope:** task 4.6 only. If D4 is declined, drop 4.6 and its acceptance line; nothing else in v1.2 changes. (Recommendation: approve.)
+- **D5.** Port allowlist for API fetch — **decided: yes**, `API_ALLOWED_PORTS` default `80,443,8443` only. (F6.2)
+- **D6.** Export buffering vs the no-disk-writes rule: openpyxl `write_only` mode and `SpooledTemporaryFile` both rely on OS temp files (transient payload-derived data). Default recommendation: **diskless** — normal-mode `Workbook` + an **XLSX-only** `MAX_EXPORT_ROWS` cap (memory-bounded, no temp files), defaulting to `0`/disabled so it never rejects a dataset `/process` accepted, with CSV/TSV streaming uncapped as the always-available fallback (see 2.3 and Performance Review P3); the memory-light temp-file route only under an explicit documented exception. (P3)
 
 **Explicit production signal:** the fail-fast (1.6) and `Secure` cookie (1.14) behaviors are gated on an explicit `APP_ENV=production` (or `PRODUCTION=true`) env var — never inferred from `not DEBUG`, because the documented local run `python app.py` has `DEBUG=False` by default.
 
@@ -52,7 +53,7 @@
 | 0.7 | Set `autoDeployTrigger: checksPass` in `render.yaml` (replaces `autoDeploy: true`) so Render waits for CI checks and blocks deployment when checks fail or are missing | `render.yaml` | — |
 | 0.8 | Remove dead code `find_candidate_arrays` + its 4 tests (D2); update the stale candidates-handshake references in `MEMORY.md`/`CLAUDE.md`/`AGENTS.md` | `helpers.py`, `tests/test_helpers.py`, docs | P10, F8 |
 
-**Acceptance:** `pip-audit -r requirements.txt` = 0 vulnerabilities; CI green; all 82 tests pass after upgrades; `pip install -r requirements.txt` no longer installs pytest; `render.yaml` gates deploys on CI checks; `find_candidate_arrays` and its tests are gone.
+**Acceptance:** `pip-audit -r requirements.txt` = 0 vulnerabilities; CI green; **`python -m pytest tests/ -v` exits 0** after the upgrades — the passing command, not a fixed count, is the criterion, because 0.8 deliberately removes the four `find_candidate_arrays` tests (baseline **82 → 78**); `pip install -r requirements.txt` no longer installs pytest; `render.yaml` gates deploys on CI checks; `find_candidate_arrays` and its tests are gone.
 
 ---
 
@@ -69,7 +70,7 @@
 | 1.5 | **Header hardening**: add HSTS (secure requests only), `Permissions-Policy`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`; extend CSP with `object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'` (build directives as a list or keep the trailing `;` separator — see Security Review F5); keep `X-Frame-Options: DENY` | `security.py`, `tests/test_routes.py` | F5 |
 | 1.6 | **SECRET_KEY fail-fast**: `create_app` raises when `APP_ENV=production` is set and `SECRET_KEY` is the dev default/unset (explicit production signal — not `not DEBUG`, which would block the documented local run); env-var int validation with clear messages | `app.py`, `config.py`, `tests/test_routes.py` | F7 |
 | 1.7 | **Recursion-depth guard**: `_depth`/`max_depth` on `extract_table_data` (mirror `flatten_for_csv`); `find_candidate_arrays` is removed in Phase 0 (D2), so no guard or tests for it; wrap `json.loads`/`parse_jsonl` callers to catch `RecursionError` → 400 "JSON nesting too deep"; 1500-deep nesting test | `helpers.py`, `routes.py`, `tests/test_helpers.py`, `tests/test_routes.py` | F8 |
-| 1.8 | **Bounded DNS**: shared module-level `ThreadPoolExecutor` (fixed `max_workers`) + in-flight semaphore + `API_DNS_TIMEOUT` (default 3s); no per-request executors; timeout is a wait bound, not a cancel | `security.py`, `config.py`, `tests/test_security.py` | F6.1, P7 |
+| 1.8 | **Bounded DNS admission**: shared, per-process `ThreadPoolExecutor` (fixed `max_workers`, e.g. 4), created **lazily inside the worker after fork** (module-level lazy init under a lock, or `os.register_at_fork(after_in_child=...)`) and torn down on worker exit via `atexit`/`shutdown(wait=False, cancel_futures=True)`. `API_DNS_TIMEOUT` (default 3s) bounds **only `Future.result()`** — it cannot cancel a running `getaddrinfo`, so an in-flight **semaphore permit is acquired before submit and released from the future's done-callback**, never on caller timeout (equivalently: a bounded submission queue). When no permit is available within a short admission wait, return 503/400 rather than queueing unboundedly. Tests: repeated timeouts do not leak permits or threads, and saturation returns the admission error instead of blocking | `security.py`, `config.py`, `tests/test_security.py` | F6.1, P7 |
 | 1.9 | **Port allowlist** for API fetch (D5): `API_ALLOWED_PORTS` default `80,443,8443` | `security.py`/`routes.py`, `config.py`, tests | F6.2 |
 | 1.10 | **Proxy-aware rate limiting** (D3): `TRUST_PROXY=1` → `ProxyFix(app, x_for=1, x_proto=1, x_host=1)` (exact trusted hop count); rate-limit key derived from `request.remote_addr` *after* ProxyFix — never from the raw `X-Forwarded-For` header; forged-header and multi-proxy tests; document Redis storage for multi-instance in `MEMORY.md` | `app.py`, `extensions.py`, `config.py`, tests | F12 |
 | 1.11 | **JSON error handlers**: 413 → `{"error": "Request too large (max 10MB)"}` JSON; generic 500 → JSON | `app.py`, tests | F10 |
@@ -90,13 +91,14 @@
 |---|---|---|---|
 | 2.1 | **gzip middleware** (D1): compress JSON/text bodies >1 KB when client accepts gzip; set `Content-Encoding: gzip`, `Vary: Accept-Encoding`; skip bodyless/`HEAD`/`204`/`304`/already-encoded/streamed (`response.is_streamed`) responses; remove or recompute `Content-Length` | `app.py` (or `security.py`), tests | P1 |
 | 2.2 | **Static cache headers**: `SEND_FILE_MAX_AGE_DEFAULT=86400` + `?v=APP_VERSION` on CSS/JS URLs | `config.py`, `templates/index.html` | P6 |
-| 2.3 | **Diskless, memory-bounded exports** (D6): normal-mode `Workbook` + hard `MAX_EXPORT_ROWS` cap (default 100k) → 400 instead of OOM; no OS temp files (openpyxl `write_only` and `SpooledTemporaryFile` both use them — off the table unless a documented exception is approved); no `output.getvalue()`; CSV generator response (natively streamable); measure RSS during generation and delivery | `routes.py`, `config.py`, tests | P3 |
+| 2.3 | **Diskless, memory-bounded exports** (D6): normal-mode `Workbook` + an XLSX-only `MAX_EXPORT_ROWS` cap → 400 instead of OOM; no OS temp files (openpyxl `write_only` and `SpooledTemporaryFile` both use them — off the table unless a documented exception is approved); no `output.getvalue()`; CSV/TSV stay **uncapped** via a generator response (natively streamable). `MAX_EXPORT_ROWS` is **XLSX-only** and defaults to `0` (disabled) so it can never reject a dataset `/process` accepted; when an operator sets it, `/process` echoes `row_count` + `max_export_rows` so the client greys out Excel and points at CSV, and `/export-xlsx` returns 400 `{"error": "…rows exceeds the Excel export limit…; use CSV/TSV"}` (see Performance Review P3) | `routes.py`, `config.py`, `static/js/app.js`, tests | P3 |
 | 2.4 | **Preview truncation (non-mutating)**: build a separate preview projection (copy) capping long strings / nested arrays / nested objects; `table_data`/`csv_data` keep full fidelity — test that exports stay untruncated | `routes.py`, `helpers.py`, tests | P2.2, P5 |
 | 2.5 | **Lazy tree picker**: build children on first toggle; cap per-level children and total nodes | `static/js/app.js` | P4 |
 | 2.6 | **Client render caps**: `renderNestedObject` ≤ 20 keys + "more"; `formatValue` stringify cap for primitive arrays; long-string truncation | `static/js/app.js` | P5 |
 | 2.7 | **Memory trim**: decode `bytearray` directly (drop `bytes()` copy) in API-fetch; single-pass flatten + column accumulation (collect into a set, sort once — preserves current column order) | `routes.py`, `helpers.py`, tests | P12, P8 |
-| 2.8 | **gunicorn tuning**: `--timeout 60` (and `--workers 2` where memory allows) in `render.yaml`, README, Docker/systemd snippets; document `API_FETCH_TIMEOUT < gunicorn timeout` invariant | `render.yaml`, `README.md` | P9 |
+| 2.8 | **gunicorn tuning**: `--timeout 60` everywhere (`render.yaml`, README, Docker/systemd snippets); document the `API_FETCH_TIMEOUT < gunicorn timeout` invariant. **Worker count is coupled to rate-limit storage (see 2.10): `--workers 1` stays the default whenever `RATELIMIT_STORAGE_URI` is `memory://`**; `--workers 2` (and the README's `--workers 4` example) only with shared storage configured | `render.yaml`, `README.md` | P9 |
 | 2.9 | **Chunked Blob** for client CSV/TSV | `static/js/app.js` | P13 |
+| 2.10 | **Rate-limit storage matches the worker count**: `memory://` counters are per-worker, so N workers let a client reach N× the configured limit. Add a startup check in `create_app()` — when the resolved worker count is > 1 (`gunicorn` `--workers`/`WEB_CONCURRENCY`) and `RATELIMIT_STORAGE_URI` is still `memory://`, log a loud warning (or fail fast under `APP_ENV=production`). Fix the README/Docker/systemd examples that show `--workers 4` with default storage, and document `RATELIMIT_STORAGE_URI=redis://…` as the supported multi-worker setup. Tests: per-worker semantics asserted explicitly (a unit test that two limiter instances on `memory://` do **not** share counters, and that the warning/fail-fast fires) | `app.py`, `extensions.py`, `config.py`, `README.md`, `render.yaml`, tests | F12 |
 
 **Acceptance:** Performance Review §4 budget met on the reference payload; export of 100k rows completes without OOM; tree picker opens instantly on a 10 MB payload; perf regression spot-checked manually (no automated perf tests in CI — optional `pytest-benchmark` deferred).
 
@@ -114,7 +116,7 @@
 | 3.4 | Move `openpyxl` import to module top (fails fast on missing dep) | `routes.py` | — |
 | 3.5 | Type annotations on `helpers.py`/`security.py` signatures (mypy optional; skip strict mode to limit scope) | `helpers.py`, `security.py` | — |
 
-**Acceptance:** all remaining existing tests pass unchanged (the `find_candidate_arrays` tests were removed with the function in Phase 0); `process_json` ≤ 50 lines; badge reflects config; no behavior change visible to API consumers.
+**Acceptance:** `python -m pytest tests/ -v` exits 0 with the remaining tests unchanged (the post-0.8 baseline of 78, plus everything added in Phases 1–2); `process_json` ≤ 50 lines; badge reflects config; no behavior change visible to API consumers.
 
 ---
 
@@ -129,11 +131,11 @@
 | 4.3 | **New client-side exports**: JSONL (lossless — original values, **no** formula sanitization) and Markdown table (Markdown-specific escaping only; the spreadsheet sanitizer from 1.1 does not apply) per `MEMORY.md` guidance | `static/js/app.js`, `templates/index.html` | Dropdown additions |
 | 4.4 | **Column visibility toggle** (hide/show columns in preview) | `static/js/app.js`, `static/css/style.css`, `templates/index.html` | |
 | 4.5 | **Deep-linkable path selection** (`#path=users.0.orders` pre-fills the tree selection) | `static/js/app.js` | Small UX win for repeat conversions |
-| 4.6 | **Opt-in Basic Auth gate** (D4): `APP_BASIC_AUTH_USER/PASS` env → `before_request` 401 (constant-time compare, `WWW-Authenticate`); off by default | `app.py`, `config.py`, `security.py`, `render.yaml` comment | Internal-tool goal; no persistence |
+| 4.6 | **Opt-in Basic Auth gate** — *conditional (D4), implement only if approved*: `APP_BASIC_AUTH_USER/PASS` env → `before_request` 401 (constant-time compare, `WWW-Authenticate`); off by default | `app.py`, `config.py`, `security.py`, `render.yaml` comment | Internal-tool goal; no persistence |
 | 4.7 | **`/health` split**: `/health/live` (process) + `/health/ready` (deps/limits) for Render health checks | `routes.py` | Small ops win |
 | 4.8 | Replace `alert()` About dialog with in-page modal (also fixes the hardcoded v1.1.0 string); make export dropdown keyboard-accessible (`aria-expanded`, Escape) | `static/js/app.js`, `templates/index.html`, `static/css/style.css` | From `code-health-final.md` §4.10 |
 
-**Acceptance:** manual pass of each feature; all exports include full row counts (not just 25); no new dependencies; CSP intact (no inline JS); `alert()` removed.
+**Acceptance:** manual pass of each *in-scope* feature; all exports include full row counts (not just 25); no new dependencies; CSP intact (no inline JS); `alert()` removed. **Conditional (D4):** if and only if D4 is approved, the Basic Auth gate rejects unauthenticated requests with 401 when the env vars are set and is fully transparent when they are unset; if D4 is declined this criterion does not apply.
 
 ---
 
@@ -171,7 +173,7 @@
 ## 5. Explicitly Out of Scope (do not implement without a decision)
 
 - **Server-side payload caching/session storage for export** — violates the no-persistence hard requirement (`MEMORY.md` 2026-05-12). Perf is solved via compression + streaming + client-side rendering instead.
-- **Redis rate-limit storage by default** — only if multi-instance becomes real; document in `MEMORY.md` and switch via `RATELIMIT_STORAGE_URI`.
+- **Redis rate-limit storage by default** — the default stays `memory://` with a **single worker** (see 2.10). Redis (or any shared `RATELIMIT_STORAGE_URI`) becomes *required*, not optional, as soon as more than one worker or instance is run; v1.2 ships the guard-rail and the docs, not a bundled Redis dependency.
 - **Frontend framework / build step** — forbidden by project conventions.
 - **CSP relaxation** (e.g. `unsafe-inline`) — never; Phase 1 only *tightens* CSP.
 - **Payload-level logging / telemetry** — never; Phases 1.2/1.3 are about *removing* such leaks.
@@ -182,8 +184,9 @@
 
 ## 6. Definition of Done (v1.2.0)
 
-- [ ] `python -m pytest tests/ -v` green (existing 82 + new tests).
+- [ ] `python -m pytest tests/ -v` exits 0 (the command is the criterion, not a count). Baseline for v1.2 is the **78** tests remaining after Phase 0.8 removes the four `find_candidate_arrays` tests (82 − 4), plus every test added in Phases 1–5.
 - [ ] `pip-audit -r requirements.txt` → 0 vulnerabilities; CI (Phase 0.3) green on push/PR.
+- [ ] Rate limiting is coherent with the shipped worker count: default deployment runs one worker on `memory://`, and any multi-worker example in the docs sets a shared `RATELIMIT_STORAGE_URI` (Phase 2.10).
 - [ ] `ruff check .` and `ruff format --check .` exit 0.
 - [ ] Security Review §4 checklist passes (formula injection inert, SSRF battery, log hygiene via caplog, headers, fail-fast SECRET_KEY, depth guards, JSON error handlers, no-store, proxy-aware limiting).
 - [ ] Performance Review §4 budget met on the reference payload; 100k-row XLSX export does not OOM.

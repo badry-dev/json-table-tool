@@ -57,7 +57,11 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 **Description:** `Workbook()` (normal mode) holds all rows in memory, and `wb.save(output)` + `output.getvalue()` create a second full copy (plus the JSON request body already holds `csv_data`). With a ~10 MB `csv_data` payload the request can transiently consume several hundred MB — enough to OOM a free-tier dyno and a 413-adjacent DoS amplifier (60/min limit only partially mitigates). CSV export (`routes.py:217-238`) has the same pattern with `io.StringIO` (smaller but still full-buffer).
 
 **Remediation:**
-- **Diskless by default.** openpyxl's `write_only=True` mode and `tempfile.SpooledTemporaryFile` both rely on OS temporary files (transient payload-derived data on disk), which conflicts with the absolute "no disk writes of payloads" rule. The diskless path is a normal-mode `Workbook` plus a hard `MAX_EXPORT_ROWS` cap (default e.g. 100k → 400 instead of OOM), which bounds peak memory without touching disk. The memory-light temp-file route is only acceptable under an explicit documented exception (roadmap D6). Note that even `write_only=True` does not eliminate the final `save()` zip assembly.
+- **Diskless by default.** openpyxl's `write_only=True` mode and `tempfile.SpooledTemporaryFile` both rely on OS temporary files (transient payload-derived data on disk), which conflicts with the absolute "no disk writes of payloads" rule. The diskless path is a normal-mode `Workbook` plus a `MAX_EXPORT_ROWS` cap, which bounds peak memory without touching disk. The memory-light temp-file route is only acceptable under an explicit documented exception (roadmap D6). Note that even `write_only=True` does not eliminate the final `save()` zip assembly.
+- **`MAX_EXPORT_ROWS` is XLSX-only and must not contradict the `/process` contract.** `/process` admits anything under `MAX_UPLOAD_SIZE` (10 MB), which can easily exceed 100k rows; a fixed 100k export cap would let `/process` return full `csv_data` for a dataset that `/export-xlsx` then rejects. Therefore:
+  - Default `MAX_EXPORT_ROWS = 0` (**disabled**) — out of the box every dataset `/process` accepts is also exportable, and memory is bounded by the same 10 MB input cap that already bounds `/process`.
+  - The cap is **scoped to XLSX only**. CSV/TSV are generator-streamed and stay uncapped, so they are always the fallback for any dataset.
+  - When an operator does set it (a smaller instance, or a stricter memory budget), the contract is explicit: `/process` returns `row_count` and the effective `max_export_rows` in its payload so the client can disable the Excel entry and label it "use CSV/TSV for N rows" *before* the user clicks; `/export-xlsx` independently returns `400 {"error": "Dataset has N rows, above the Excel export limit of M; export CSV or TSV instead."}` (defence in depth for direct API callers). No silent truncation — a partial spreadsheet is worse than a refusal.
 - Deliver via `send_file`/`Response(iter)`; do **not** `output.getvalue()` the whole buffer into memory.
 - For CSV: use a generator-based `Response` that yields rows (`csv` writer needs a text wrapper — yield `''.join`-chunked or use `io.StringIO` flush per N rows). CSV is natively streamable with no temp files. Keep `extrasaction='ignore'` and the F1 sanitization.
 
@@ -140,7 +144,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 
 **Description:** `API_FETCH_TIMEOUT` defaults to 30s and gunicorn's default `--timeout` is also 30s. An API fetch that takes ~30s races the worker kill: gunicorn SIGKILLs the worker mid-response → client sees 502, worker respawn cost, request fails with a confusing error. None of the documented gunicorn invocations set `--timeout` or `--workers`.
 
-**Remediation:** Set `--timeout 60` (≥ API_FETCH_TIMEOUT × 2) in `render.yaml` and README/Docker/systemd examples; make the relationship explicit in config docs. Optionally lower `API_FETCH_TIMEOUT` to 15s for snappier failures. Add `--workers 2` note for the free tier (memory permitting) or keep 1 and document it.
+**Remediation:** Set `--timeout 60` (≥ API_FETCH_TIMEOUT × 2) in `render.yaml` and README/Docker/systemd examples; make the relationship explicit in config docs. Optionally lower `API_FETCH_TIMEOUT` to 15s for snappier failures. Keep `--workers 1` as the documented default: worker count is coupled to rate-limit correctness (`memory://` counters are per worker), so `--workers 2` — and the README's `--workers 4` example — require a shared `RATELIMIT_STORAGE_URI` first (roadmap 2.10).
 
 **Effort:** 15m. **Verification:** a 35s mock API fetch no longer returns 502.
 
@@ -220,13 +224,27 @@ Measured on a reference payload (10 MB, ~200k rows of mixed nesting), single fre
 |---|---|---|
 | `/process` transfer size | ~10-20 MB | ≤ 2-4 MB (gzip) |
 | `/process` p95 latency (paste/upload only) | seconds (unbounded) | ≤ 3s |
-| Peak RSS, `/process` (10 MB input) | ~40-60 MB | ≤ ~50 MB; no OOM under the default 512 MB |
-| Peak RSS, `/export-xlsx` 100k rows | hundreds of MB (OOM risk) | ≤ 150 MB, streams |
+| Peak RSS **delta**, `/process` (10 MB input) | ~40-60 MB | **≤ 50 MB** (pass/fail); no OOM under the default 512 MB |
+| Peak RSS **delta**, `/export-xlsx` 100k rows | hundreds of MB (OOM risk) | **≤ 150 MB** (pass/fail), streams |
 | Tree-picker open, 10 MB payload | multi-second freeze | ≤ 500 ms initial; lazy children |
 | Cell with 10k-key object | freeze | renders ≤ 20 keys + "more" |
 | Static assets | revalidated every load | cached ≥ 1 day |
 
 The latency target explicitly **excludes API-fetch requests** — those are bounded separately by `API_FETCH_TIMEOUT` (default 30s) plus DNS time (P7/F6) and would otherwise make a single aggregate p95 meaningless. The peak-RSS target reflects the full parse → flatten → `jsonify` pipeline (P12); it is not a claim that gzip or dropping one copy makes the process fit under 30 MB.
+
+**RSS measurement method (identical for `/process` and for the export measurement — both rows are pass/fail against these exact rules):**
+
+| Parameter | Definition |
+|---|---|
+| Quantity | **RSS delta**, not absolute RSS: `peak_rss_during_request − baseline_rss`. Absolute RSS varies with interpreter/build and is not portable between machines. |
+| Baseline | `psutil.Process(worker_pid).memory_info().rss` sampled immediately before the measured request, on an **idle** worker (no in-flight requests). |
+| Warm-up | One full identical request is issued and discarded first, so imports, the openpyxl module tree, and allocator arenas are already resident. Baseline is read **after** the warm-up request completes and `gc.collect()` has run. |
+| Peak | Max of samples taken every **50 ms** from a separate monitor thread/process, from request start until the **response body has been fully consumed by the client** (delivery included — not just generation). |
+| Concurrency | **1** — exactly one in-flight request, single gunicorn worker (`--workers 1 --threads 1`), no other traffic. |
+| Payload | The fixed reference payload (10 MB, ~200k rows of mixed nesting) for `/process`; a 100k-row `csv_data` body for `/export-xlsx`. Both committed as fixtures/generators so runs are reproducible. |
+| Verdict | **Pass** iff `peak − baseline ≤ 50 MB` (`/process`) or `≤ 150 MB` (`/export-xlsx`), as the **median of 3 runs**; a single run above the limit is retried, two of three above the limit is a fail. |
+
+These are manual/CI-optional measurements (no perf tests gate CI in v1.2), but the numbers reported against this budget must be produced by exactly this method or they are not comparable.
 
 ---
 
@@ -237,4 +255,4 @@ The latency target explicitly **excludes API-fetch requests** — those are boun
 - **No frontend framework / build step**: all client fixes are vanilla JS.
 - **Strict CSP, no inline JS**: any new client code stays in `static/js/app.js`.
 - **Exact-pinned dependencies**: any new dependency (e.g. `Flask-Compress`) must be pinned exactly and added deliberately; the zero-dependency middleware is preferred.
-- **Per-worker in-memory rate limiter**: benchmark results should assume no shared counters across workers.
+- **Per-worker in-memory rate limiter**: `RATELIMIT_STORAGE_URI` defaults to `memory://`, so counters are **per worker** — N workers allow up to N× the configured limit for one client. The default deployment therefore stays at one worker; any multi-worker configuration (roadmap 2.8/2.10) must set a shared `RATELIMIT_STORAGE_URI` (e.g. Redis). Benchmarks must record the worker count and storage backend, and assume no shared counters when running on `memory://`.
