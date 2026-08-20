@@ -224,8 +224,8 @@ Measured on a reference payload (10 MB, ~200k rows of mixed nesting), single fre
 |---|---|---|
 | `/process` transfer size | ~10-20 MB | ≤ 2-4 MB (gzip) |
 | `/process` p95 latency (paste/upload only) | seconds (unbounded) | ≤ 3s |
-| Peak RSS **delta**, `/process` (10 MB input) | ~40-60 MB | **≤ 50 MB** delta (pass/fail), absolute high-water < 256 MB |
-| Peak RSS **delta**, `/export-xlsx` 100k rows | hundreds of MB (OOM risk) | **≤ 150 MB** delta (pass/fail), absolute high-water < 256 MB, streams |
+| Peak RSS **delta**, `/process` (10 MB input) | ~40-60 MiB | **≤ 50 MiB** delta (pass/fail), absolute high-water < 256 MiB |
+| Peak RSS **delta**, `/export-xlsx` 100k rows | hundreds of MiB (OOM risk) | **≤ 150 MiB** delta (pass/fail), absolute high-water < 256 MiB, streams |
 | Tree-picker open, 10 MB payload | multi-second freeze | ≤ 500 ms initial; lazy children |
 | Cell with 10k-key object | freeze | renders ≤ 20 keys + "more" |
 | Static assets | revalidated every load | cached ≥ 1 day |
@@ -236,6 +236,8 @@ The latency target explicitly **excludes API-fetch requests** — those are boun
 
 | Parameter | Definition |
 |---|---|
+| Units | **`ru_maxrss` is not portable.** On Linux it is **KiB**; on macOS/Darwin the same field is **bytes**. Read it, multiply by 1024 on Linux, and report everything in **MiB** (1 MiB = 1048576 bytes). Every memory threshold in this budget is written in **MiB**, not decimal MB. A harness that skips the platform conversion silently reports numbers 1024× off. |
+| Environment parity | Both runs of a pair must execute on the **same OS and kernel, the same container image, the same Python build, and the same cgroup/container resource limits**, on an otherwise idle host. A baseline from one image and a measurement from another is not a delta. Record all of these alongside the result. |
 | Peak, and why not sampling | `resource.getrusage(RUSAGE_SELF).ru_maxrss`, read **in the worker** after the response is fully delivered. The kernel maintains this high-water mark continuously, so no transient spike during JSON serialization or XLSX zip assembly can slip between samples. 50 ms sampling from a monitor thread is kept only as a **supplementary trace** for locating *where* the peak occurs; a sampled maximum is never the number reported. |
 | **No warm-up inside a measured process** | `ru_maxrss` is **monotonic for the lifetime of the process** — it cannot be reset, and any earlier peak stays in it. A warm-up request served by the same worker therefore leaves its own peak behind, and subtracting a post-warm-up baseline would not isolate the measured request (a large warm-up could even produce a false failure). So each measured run uses a **fresh worker that serves exactly one request** and is then discarded. First-request costs (lazy imports, the openpyxl module tree, cold allocator arenas) are deliberately *inside* the measurement — they are real memory the first request after a restart pays. |
 | Two runs, not two samples | Because the counter cannot be reset mid-process, the delta is taken **across two fresh-worker runs of the same build**, never within one: `baseline` = `ru_maxrss` of a freshly booted worker that has served **zero** requests; `measured` = `ru_maxrss` of a freshly booted worker that has served **exactly one** request. `delta = measured − baseline`. Both operands are absolute high-water marks of comparable processes, so the subtraction is meaningful. |
@@ -243,7 +245,8 @@ The latency target explicitly **excludes API-fetch requests** — those are boun
 | Absolute vs delta | Both are recorded and reported. The **delta** is the portable pass/fail target (it cancels interpreter/build differences). The **absolute** high-water mark from the measured run is what the no-OOM criterion is checked against, since a delta says nothing about total footprint. |
 | Concurrency | **1** — exactly one in-flight request, single gunicorn worker (`--workers 1 --threads 1`), no other traffic. |
 | Payload | The fixed reference payload (10 MB, ~200k rows of mixed nesting) for `/process`; a 100k-row `csv_data` body for `/export-xlsx`. Both committed as fixtures/generators so runs are reproducible. |
-| Verdict | **Pass** iff the cross-run delta `≤ 50 MB` (`/process`) or `≤ 150 MB` (`/export-xlsx`) **and** the measured run's absolute high-water mark stays under half the container limit (256 MB of the default 512 MB), as the **median of 3 run-pairs**; a single pair above a limit is retried, two of three above it is a fail. |
+| Verdict | **Pass** iff the cross-run delta `≤ 50 MiB` (`/process`) or `≤ 150 MiB` (`/export-xlsx`) **and** the measured run's absolute high-water mark stays under half the container limit (256 MiB of the default 512 MiB), as the **median of 3 run-pairs**; a single pair above a limit is retried, two of three above it is a fail. |
+| Blocked pairs are failures | A pair that cannot produce a number — OOM kill, worker crash, request timeout, truncated or incomplete response, or a missing/unreadable `ru_maxrss` — **counts as a failed pair and stays in the set of three**. It is never dropped, re-rolled as though it had not happened, or treated as a clean sample. An OOM is the single most important signal this budget exists to catch; discarding it as "no data" would invert the result. Record the failure mode with the run. |
 
 These are manual/CI-optional measurements (no perf tests gate CI in v1.2), but the numbers reported against this budget must be produced by exactly this method or they are not comparable.
 
