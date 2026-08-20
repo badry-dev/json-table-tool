@@ -15,6 +15,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 | High | 2 | P1 Uncompressed multi-MB JSON responses, P3 XLSX export memory (openpyxl non-streaming + full buffering) |
 | Medium | 6 | P2 Full dataset shipped per request, P4 Eager tree-picker DOM build, P5 Unbounded nested-cell render/stringify, P7 Blocking DNS lookup in worker, P9 Gunicorn timeout vs `API_FETCH_TIMEOUT` misalignment, P12 Multi-copy memory in `process_json` |
 | Low | 4 | P6 No static-asset cache headers, P8 Double column scan + wasteful flatten intermediates, P10 Dead code `find_candidate_arrays`, P11 Hardcoded "25" preview badge |
+| Info | 1 | P13 Client-side CSV/TSV string building |
 
 **Quick wins:** P1 (gzip), P6 (cache headers), P8 (one-pass columns), P10 (dead code), P11 (preview_limit in payload).
 
@@ -26,9 +27,9 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 
 **Location:** `routes.py:188-195` (response), no gzip middleware anywhere.
 
-**Description:** `/process` returns `preview` + `csv_data` (the **full** flattened dataset) + `csv_columns`. For a 10 MB JSON input the response body is commonly 5–20 MB of repetitive JSON. No compression layer exists (Flask serves it raw; gunicorn's default setup doesn't gzip; Nginx config in README has no `gzip`). Text/JSON compresses 5–10× — this is the largest single transfer-time and bandwidth win available, and it also cuts client memory and parse time.
+**Description:** `/process` returns `preview` + `csv_data` (the **full** flattened dataset) + `csv_columns`. For a 10 MB JSON input the response body is commonly 5–20 MB of repetitive JSON. No compression layer exists (Flask serves it raw; gunicorn's default setup doesn't gzip; Nginx config in README has no `gzip`). Text/JSON compresses 5–10×, so gzip is the largest single transfer-time and bandwidth win available. It does **not** reduce the client's uncompressed `csv_data` representation or its JSON parse cost — the browser still receives, decompresses, parses, and stores the full dataset; those are P2 (payload size) and P5 (rendering) concerns.
 
-**Remediation:** Add a small gzip middleware (Flask `after_request` that gzips bodies > ~1 KB when `Accept-Encoding` includes gzip, setting `Content-Encoding`/`Vary`; skip for already-small and for the streamed export responses). Avoid adding a dependency unless preferred — a ~20-line middleware in `app.py`/`security.py` fits the project's minimal-deps stance. If a dependency is acceptable, `Flask-Compress` is the standard choice (pin exactly).
+**Remediation:** Add a small gzip middleware (Flask `after_request`) that compresses only when the response is eligible: `Accept-Encoding` includes gzip, the body is text/JSON over ~1 KB, and the response is compressible — skip bodyless responses, `HEAD`/`204`/`304`, bodies already carrying a `Content-Encoding`, and streamed responses (`response.is_streamed`, which covers the streaming export routes). Set `Content-Encoding: gzip` and `Vary: Accept-Encoding`, and remove or recompute `Content-Length` so it matches the compressed payload. Avoid adding a dependency unless preferred — a ~20-line middleware in `app.py`/`security.py` fits the project's minimal-deps stance. If a dependency is acceptable, `Flask-Compress` is the standard choice (pin exactly).
 
 **Effort:** 1h. **Verification:** `curl -H 'Accept-Encoding: gzip' -s -o /dev/null -w '%{size_download} %{time_total}'` on a large `/process` call before/after; compare sizes.
 
@@ -41,7 +42,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 **Description:** The server flattens **all** rows (`csv_data = [flatten_for_csv(row, ...) for row in table_data]`) and serializes them all to the client, although only `PREVIEW_ROW_LIMIT` (25) rows are rendered. Cost: server CPU for full flattening, ~3× peak memory (input + rows + response), full payload transfer, client memory, client parse time. The design is deliberate — CSV/TSV export is client-side from `csv_data`, and the no-persistence rule forbids holding the dataset server-side between requests (`MEMORY.md` 2026-05-12). **Do not** fix by caching payloads server-side.
 
 **Remediation options (in order of fit):**
-1. **Compress the response (P1)** — addresses transfer and parse cost without changing the architecture.
+1. **Compress the response (P1)** — reduces transfer size/time without changing the architecture (client parse and memory cost are unchanged; see P2/P5).
 2. **Stream-aware preview truncation** — server-side cap nested values/long strings inside `preview` rows only (keep full fidelity in `csv_data`). Cheap, prevents the worst client-render cases (see P5).
 3. **Client-side lazy rendering** — the data is already in the browser; implement "load more" pagination over `csv_data` so the DOM only ever holds a window of rows (also a feature; roadmap Phase 4).
 
@@ -56,12 +57,13 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 **Description:** `Workbook()` (normal mode) holds all rows in memory, and `wb.save(output)` + `output.getvalue()` create a second full copy (plus the JSON request body already holds `csv_data`). With a ~10 MB `csv_data` payload the request can transiently consume several hundred MB — enough to OOM a free-tier dyno and a 413-adjacent DoS amplifier (60/min limit only partially mitigates). CSV export (`routes.py:217-238`) has the same pattern with `io.StringIO` (smaller but still full-buffer).
 
 **Remediation:**
-- `Workbook(write_only=True)` for XLSX — streams rows to a temp/SpooledTemporaryFile instead of keeping the tree in memory.
-- Stream the response: build the file in a temp file (`tempfile.SpooledTemporaryFile`) and `send_file`/`Response(iter)` with proper headers; do **not** `output.getvalue()` into memory.
+- `Workbook(write_only=True)` for XLSX — limits worksheet row retention. Note that `save()` still finalizes the zip archive, so memory is reduced, not eliminated.
+- Buffer with an **explicit finite limit**. `tempfile.SpooledTemporaryFile(max_size=...)` requires a non-zero `max_size` — its default `0` disables size-based rollover, keeping everything in memory. If staying strictly inside the "no disk writes of payloads" rule is preferred, use a memory-only `io.BytesIO` with a hard size cap derived from `MAX_EXPORT_ROWS`; request-scoped temp-file rollover would need a documented exception to that rule (see roadmap 2.3).
+- Deliver via `send_file`/`Response(iter)`; do **not** `output.getvalue()` the whole buffer into memory.
 - For CSV: use a generator-based `Response` that yields rows (`csv` writer needs a text wrapper — yield `''.join`-chunked or use `io.StringIO` flush per N rows). Keep `extrasaction='ignore'` and the F1 sanitization.
 - Add an export row-count guard (`MAX_EXPORT_ROWS`, default e.g. 100k) → 400 with a clear message instead of OOM.
 
-**Effort:** 2h. **Verification:** export 100k rows; measure RSS before/after; assert response streams (Content-Length absent or chunked).
+**Effort:** 2h. **Verification:** export 100k rows and measure RSS **during generation and during response delivery** — do not infer bounded memory from a missing `Content-Length` or chunked transfer, since those only indicate streaming, not peak usage.
 
 ---
 
@@ -88,7 +90,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 - Server side, `preview` rows carry full-fidelity nested structures, so all of the above are fed directly by the API.
 
 **Remediation (server + client):**
-- Server: truncate in `preview` only — long strings to ~256 chars, nested arrays to ~20 items, nested objects to ~20 keys, with `"… (truncated)"` markers; full data stays in `csv_data`/export.
+- Server: truncate in `preview` only, **without mutating shared objects** — build a separate preview projection (copy) so `table_data`/`csv_data` keep full fidelity; add a test asserting exports still contain untruncated values. Long strings → ~256 chars, nested arrays → ~20 items, nested objects → ~20 keys, with `"… (truncated)"` markers.
 - Client: cap `renderNestedObject` keys (e.g. 20 + "and N more"); cap `JSON.stringify` length for primitive arrays (render first N + count); add `max-width`/ellipsis already present via CSS but ensure no full-string `innerHTML` blow-ups.
 
 **Effort:** 1-2h. **Verification:** cell containing a 10k-key object renders < 1 s and < N MB heap.
@@ -113,7 +115,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 
 **Description:** DNS resolution runs on the gunicorn worker thread with **no timeout** (see Security Review F6). A slow/malicious nameserver ties up the worker for seconds-to-minutes; with few workers (free tier defaults to 1-2), one request can stall the whole app. Also adds per-request latency to every API fetch (usually 5-50ms, but unbounded worst case).
 
-**Remediation:** Run `getaddrinfo` under `ThreadPoolExecutor(max_workers=4).submit(...).result(timeout=API_DNS_TIMEOUT)` (default ~3s) → on timeout return the existing invalid-URL error. Optionally memoize validated hostnames with a short TTL (e.g. 60s, LRU cache) — but beware TTL-vs-rebinding tradeoffs; keep TTL short.
+**Remediation:** Use a **shared, module-level** `ThreadPoolExecutor` with a fixed `max_workers` and an in-flight semaphore; wait via `future.result(timeout=API_DNS_TIMEOUT)` (default ~3s) and return the existing invalid-URL error on timeout. Do **not** create a per-request executor — `result(timeout=...)` bounds only the caller's wait and cannot cancel a running `getaddrinfo` (per-request executors leak blocked threads; a shared unbounded pool can saturate). A *hard* execution bound needs process isolation or a cancellable resolver; document the timeout as a wait bound. Do **not** rely on memoizing validated hostnames as a rebinding control — a cached approval can differ from the address the client actually connects to; hostname caching (if ever added) is a latency optimization only, never a security control.
 
 **Effort:** 1h. **Verification:** mock `getaddrinfo` sleeping 10s → `/process` returns in ~3s; no worker stall.
 
@@ -128,7 +130,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 - `flatten_for_csv` builds a `list` of tuples and then a `dict` for every row (`items = []` … `dict(items)`) — extra allocation per row, per level.
 - `json.dumps` is called for every list-valued cell even when the row will only appear in the preview.
 
-**Remediation:** One pass that both flattens and accumulates column names (`yield` flattened dict + update a shared column set); build the result dict directly instead of list-of-tuples. Micro-optimizations — measurable only on very large inputs, bundle with P2 work.
+**Remediation:** One pass that both flattens and accumulates column names: collect names into a set during flattening and **sort once at the end** — this preserves the current `get_all_columns` sorted-output contract (do not rely on set iteration order, which is insertion-order-dependent); build the result dict directly instead of list-of-tuples. Micro-optimizations — measurable only on very large inputs, bundle with P2 work, and verify that `csv_columns`/rendered column order is byte-identical to today.
 
 **Effort:** 1h. **Verification:** same outputs; `get_all_columns` result identical.
 
@@ -152,7 +154,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 
 **Description:** The function and its 4 tests (`tests/test_helpers.py:110-134`) exist solely for the **old** candidates handshake replaced by the JSON tree picker (commit `e537042`). It is recursive without a depth guard (security finding F8) and confuses contributors reading the code (and the docs — see F17).
 
-**Remediation:** Delete the function and its tests, or repurpose it to pre-populate the tree picker's "recommended paths" (a small feature). If deleted, update the stale `MEMORY.md`/`CLAUDE.md`/`AGENTS.md` descriptions.
+**Remediation:** Delete the function and its 4 tests (decided in roadmap D2, executed in Phase 0.8) and update the stale `MEMORY.md`/`CLAUDE.md`/`AGENTS.md` descriptions. Repurposing it to pre-populate the tree picker is explicitly not chosen.
 
 **Effort:** 15m.
 
@@ -176,7 +178,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 
 **Description:** Peak memory during `/process` (API path): streamed `bytearray` → `bytes(content)` copy → decoded `str` → parsed JSON objects → flattened rows → `jsonify` string — roughly 4-6× the payload size, plus JSON encoder overhead. Upload/paste paths skip the first two copies. For 10 MB inputs this is ~40-60 MB transient; with default free-tier memory (~512 MB) and a few concurrent requests this is the realistic OOM risk.
 
-**Remediation:** Drop the intermediate `bytes(content)` copy (decode the `bytearray` directly via `content.decode('utf-8')`); consider `json.loads(text, parse_float=...)` untouched, but **do** add a peak-memory guard: cap effective input by measuring the parsed object depth/size (or simply document the 10 MB→~60 MB multiplier). P1 compression also shrinks the response copy.
+**Remediation:** Drop the intermediate `bytes(content)` copy (decode the `bytearray` directly via `content.decode('utf-8')`) — this removes one copy only. Parsing, flattening, and `jsonify` still materialize the full dataset, and gzip applied after `jsonify` does **not** reduce that peak. Do not treat post-parse size measurement as a peak-memory guard; either add a pre-parse/streaming input limit (an effective cap on what can be submitted) or document the full-pipeline multiplier and set the §4 budget accordingly.
 
 **Effort:** 30m + testing.
 
@@ -196,16 +198,16 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 
 | ID | Finding | Severity | Remediation | Effort |
 |---|---|---|---|---|
-| P1 | No response compression | High | gzip middleware for bodies >1 KB | 1h |
-| P3 | XLSX/CSV fully buffered | High | `write_only` + spooled temp + generator; row guard | 2h |
+| P1 | No response compression | High | gzip middleware (guards + Content-Length fix) | 1h |
+| P3 | XLSX/CSV fully buffered | High | `write_only` + explicit spool/memory cap + generator; row guard | 2h |
 | P2 | Full dataset shipped per request | Medium | P1 + preview truncation + lazy render (design-constrained) | 1h + feature |
 | P4 | Eager tree-picker DOM | Medium | Lazy children build + caps | 2h |
-| P5 | Unbounded nested-cell render | Medium | Server preview truncation + client caps | 1-2h |
-| P7 | Blocking DNS in worker | Medium | Bounded resolver (shared with F6) | 1h |
+| P5 | Unbounded nested-cell render | Medium | Non-mutating preview projection + client caps | 1-2h |
+| P7 | Blocking DNS in worker | Medium | Shared bounded resolver + in-flight limit (shared with F6) | 1h |
 | P9 | gunicorn timeout < API timeout | Medium | `--timeout 60` everywhere | 15m |
-| P12 | Multi-copy memory in `/process` | Medium | Drop `bytes()` copy; document multiplier | 30m |
+| P12 | Multi-copy memory in `/process` | Medium | Drop `bytes()` copy; document full-pipeline peak | 30m |
 | P6 | No static cache headers | Low | `SEND_FILE_MAX_AGE_DEFAULT` + versioned URLs | 20m |
-| P8 | Double column scan / tuple dicts | Low | Single-pass flatten+columns | 1h |
+| P8 | Double column scan / tuple dicts | Low | Single-pass flatten + sorted columns (order-preserving) | 1h |
 | P10 | Dead code `find_candidate_arrays` | Low | Delete + doc sync | 15m |
 | P11 | Hardcoded "25" badge | Low | `preview_limit` in payload | 20m |
 | P13 | Client CSV giant string | Info | Chunked Blob | 15m |
@@ -219,12 +221,14 @@ Measured on a reference payload (10 MB, ~200k rows of mixed nesting), single fre
 | Metric | Current (est.) | Target |
 |---|---|---|
 | `/process` transfer size | ~10-20 MB | ≤ 2-4 MB (gzip) |
-| `/process` p95 latency | seconds (unbounded) | ≤ 3s |
-| Peak RSS, `/process` | ~40-60 MB | ≤ ~30 MB |
+| `/process` p95 latency (paste/upload only) | seconds (unbounded) | ≤ 3s |
+| Peak RSS, `/process` (10 MB input) | ~40-60 MB | ≤ ~50 MB; no OOM under the default 512 MB |
 | Peak RSS, `/export-xlsx` 100k rows | hundreds of MB (OOM risk) | ≤ 150 MB, streams |
 | Tree-picker open, 10 MB payload | multi-second freeze | ≤ 500 ms initial; lazy children |
 | Cell with 10k-key object | freeze | renders ≤ 20 keys + "more" |
 | Static assets | revalidated every load | cached ≥ 1 day |
+
+The latency target explicitly **excludes API-fetch requests** — those are bounded separately by `API_FETCH_TIMEOUT` (default 30s) plus DNS time (P7/F6) and would otherwise make a single aggregate p95 meaningless. The peak-RSS target reflects the full parse → flatten → `jsonify` pipeline (P12); it is not a claim that gzip or dropping one copy makes the process fit under 30 MB.
 
 ---
 
