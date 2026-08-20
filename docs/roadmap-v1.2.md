@@ -29,6 +29,9 @@
 - **D3.** Opt-in `TRUST_PROXY`/`ProxyFix` (recommended, off by default) — never trust `X-Forwarded-For` unconditionally. (F12)
 - **D4.** Opt-in HTTP Basic Auth gate for the whole app via env (`APP_BASIC_AUTH_USER`/`APP_BASIC_AUTH_PASS`, off by default)? This is the internal-tool use case from README §"Access Control". (Recommendation: add it — small, opt-in, no persistence, but it *is* an access-control feature so confirm first.)
 - **D5.** Port allowlist for API fetch: default `80,443,8443` only. (F6.2 — recommendation: yes.)
+- **D6.** Export buffering vs the no-disk-writes rule: openpyxl `write_only` mode and `SpooledTemporaryFile` both rely on OS temp files (transient payload-derived data). Default recommendation: **diskless** — normal-mode `Workbook` + hard `MAX_EXPORT_ROWS` cap (memory-bounded, no temp files); the memory-light temp-file route only under an explicit documented exception. (P3)
+
+**Explicit production signal:** the fail-fast (1.6) and `Secure` cookie (1.14) behaviors are gated on an explicit `APP_ENV=production` (or `PRODUCTION=true`) env var — never inferred from `not DEBUG`, because the documented local run `python app.py` has `DEBUG=False` by default.
 
 ---
 
@@ -64,7 +67,7 @@
 | 1.3 | **API-fetch JSONL ValueError → 400** generic message (before outer handler); keeps the exception out of logs and returns the correct client-error status | `routes.py`, `tests/test_routes.py` | F9 |
 | 1.4 | **Outbound header-name allowlist**: regex `^[A-Za-z0-9-]+$` + reject hop-by-hop/reserved names (`host`, `content-length`, `transfer-encoding`, `connection`, `proxy-*`, `authorization`, `cookie`) → 400 | `routes.py`, `tests/test_routes.py` | F4 |
 | 1.5 | **Header hardening**: add HSTS (secure requests only), `Permissions-Policy`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`; extend CSP with `object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'` (build directives as a list or keep the trailing `;` separator — see Security Review F5); keep `X-Frame-Options: DENY` | `security.py`, `tests/test_routes.py` | F5 |
-| 1.6 | **SECRET_KEY fail-fast**: `create_app` raises when not `DEBUG`/`TESTING` and `SECRET_KEY` is the dev default; env-var int validation with clear messages | `app.py`, `config.py`, `tests/test_routes.py` | F7 |
+| 1.6 | **SECRET_KEY fail-fast**: `create_app` raises when `APP_ENV=production` is set and `SECRET_KEY` is the dev default/unset (explicit production signal — not `not DEBUG`, which would block the documented local run); env-var int validation with clear messages | `app.py`, `config.py`, `tests/test_routes.py` | F7 |
 | 1.7 | **Recursion-depth guard**: `_depth`/`max_depth` on `extract_table_data` (mirror `flatten_for_csv`); `find_candidate_arrays` is removed in Phase 0 (D2), so no guard or tests for it; wrap `json.loads`/`parse_jsonl` callers to catch `RecursionError` → 400 "JSON nesting too deep"; 1500-deep nesting test | `helpers.py`, `routes.py`, `tests/test_helpers.py`, `tests/test_routes.py` | F8 |
 | 1.8 | **Bounded DNS**: shared module-level `ThreadPoolExecutor` (fixed `max_workers`) + in-flight semaphore + `API_DNS_TIMEOUT` (default 3s); no per-request executors; timeout is a wait bound, not a cancel | `security.py`, `config.py`, `tests/test_security.py` | F6.1, P7 |
 | 1.9 | **Port allowlist** for API fetch (D5): `API_ALLOWED_PORTS` default `80,443,8443` | `security.py`/`routes.py`, `config.py`, tests | F6.2 |
@@ -72,7 +75,7 @@
 | 1.11 | **JSON error handlers**: 413 → `{"error": "Request too large (max 10MB)"}` JSON; generic 500 → JSON | `app.py`, tests | F10 |
 | 1.12 | **`Cache-Control: no-store`** on `/process`, `/export-csv`, `/export-xlsx`, `/health` | `security.py` or routes, tests | F11 |
 | 1.13 | **Upload validation**: reject non-`.json`/`.jsonl` filenames and unexpected content-types → 400 | `routes.py`, tests | F13 |
-| 1.14 | **Cookie hardening**: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE='Lax'`, `SESSION_COOKIE_SECURE=not DEBUG` | `config.py`, tests | F16 |
+| 1.14 | **Cookie hardening**: `SESSION_COOKIE_HTTPONLY=True`, `SESSION_COOKIE_SAMESITE='Lax'`, `SESSION_COOKIE_SECURE` tied to the explicit `APP_ENV=production` signal (not `not DEBUG`) | `config.py`, tests | F16 |
 | 1.15 | **Version disclosure** (aligned with the current `/health` contract): keep `version` returned by default; optional `HEALTH_REVEAL_VERSION` gate defaults to **on** (no behavior change); add tests only if the gate is implemented | `routes.py`, `config.py` | F15 |
 
 **Acceptance:** Security Review §4 checklist fully passes (formula files open inert in Excel; SSRF battery incl. decimal/hex/mapped-IPv6; CSRF 400 without token; no token in `caplog`; HSTS+CSP headers present; 413/500 JSON; depth-1500 JSON → 400; per-client rate buckets with `TRUST_PROXY=1`).
@@ -87,7 +90,7 @@
 |---|---|---|---|
 | 2.1 | **gzip middleware** (D1): compress JSON/text bodies >1 KB when client accepts gzip; set `Content-Encoding: gzip`, `Vary: Accept-Encoding`; skip bodyless/`HEAD`/`204`/`304`/already-encoded/streamed (`response.is_streamed`) responses; remove or recompute `Content-Length` | `app.py` (or `security.py`), tests | P1 |
 | 2.2 | **Static cache headers**: `SEND_FILE_MAX_AGE_DEFAULT=86400` + `?v=APP_VERSION` on CSS/JS URLs | `config.py`, `templates/index.html` | P6 |
-| 2.3 | **Memory-bounded exports**: `Workbook(write_only=True)` + explicit `SpooledTemporaryFile(max_size=...)` **or** memory-only `io.BytesIO` with a hard size cap (preferred — keeps the "no disk writes of payloads" rule absolute; request-scoped temp rollover would need a documented exception); no `output.getvalue()`; CSV generator response; `MAX_EXPORT_ROWS` guard (default 100k); measure RSS during generation and delivery | `routes.py`, `config.py`, tests | P3 |
+| 2.3 | **Diskless, memory-bounded exports** (D6): normal-mode `Workbook` + hard `MAX_EXPORT_ROWS` cap (default 100k) → 400 instead of OOM; no OS temp files (openpyxl `write_only` and `SpooledTemporaryFile` both use them — off the table unless a documented exception is approved); no `output.getvalue()`; CSV generator response (natively streamable); measure RSS during generation and delivery | `routes.py`, `config.py`, tests | P3 |
 | 2.4 | **Preview truncation (non-mutating)**: build a separate preview projection (copy) capping long strings / nested arrays / nested objects; `table_data`/`csv_data` keep full fidelity — test that exports stay untruncated | `routes.py`, `helpers.py`, tests | P2.2, P5 |
 | 2.5 | **Lazy tree picker**: build children on first toggle; cap per-level children and total nodes | `static/js/app.js` | P4 |
 | 2.6 | **Client render caps**: `renderNestedObject` ≤ 20 keys + "more"; `formatValue` stringify cap for primitive arrays; long-string truncation | `static/js/app.js` | P5 |

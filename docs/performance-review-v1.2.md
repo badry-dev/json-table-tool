@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-The app's heavy operations are all in `/process` (parse + flatten + full-dataset response) and the export routes. With the default 10 MB input cap, a single request can hold **input JSON + flattened rows + response JSON in memory at once**, and the client downloads the *entire* dataset even though it only displays 25 preview rows. The single highest-leverage fix is **gzip compression of `/process` responses** (typical JSON compresses 5–10×). Second is **streaming/memory-bounded exports** (openpyxl `write_only` + generator responses). Frontend, the **eager JSON tree picker** and **unbounded nested-cell rendering** are the freeze risks.
+The app's heavy operations are all in `/process` (parse + flatten + full-dataset response) and the export routes. With the default 10 MB input cap, a single request can hold **input JSON + flattened rows + response JSON in memory at once**, and the client downloads the *entire* dataset even though it only displays 25 preview rows. The single highest-leverage fix is **gzip compression of `/process` responses** (typical JSON compresses 5–10×). Second is **diskless, memory-bounded exports** (capped workbook + generator responses — no OS temp files). Frontend, the **eager JSON tree picker** and **unbounded nested-cell rendering** are the freeze risks.
 
 | Severity | Count | Items |
 |---|---|---|
@@ -57,11 +57,9 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 **Description:** `Workbook()` (normal mode) holds all rows in memory, and `wb.save(output)` + `output.getvalue()` create a second full copy (plus the JSON request body already holds `csv_data`). With a ~10 MB `csv_data` payload the request can transiently consume several hundred MB — enough to OOM a free-tier dyno and a 413-adjacent DoS amplifier (60/min limit only partially mitigates). CSV export (`routes.py:217-238`) has the same pattern with `io.StringIO` (smaller but still full-buffer).
 
 **Remediation:**
-- `Workbook(write_only=True)` for XLSX — limits worksheet row retention. Note that `save()` still finalizes the zip archive, so memory is reduced, not eliminated.
-- Buffer with an **explicit finite limit**. `tempfile.SpooledTemporaryFile(max_size=...)` requires a non-zero `max_size` — its default `0` disables size-based rollover, keeping everything in memory. If staying strictly inside the "no disk writes of payloads" rule is preferred, use a memory-only `io.BytesIO` with a hard size cap derived from `MAX_EXPORT_ROWS`; request-scoped temp-file rollover would need a documented exception to that rule (see roadmap 2.3).
+- **Diskless by default.** openpyxl's `write_only=True` mode and `tempfile.SpooledTemporaryFile` both rely on OS temporary files (transient payload-derived data on disk), which conflicts with the absolute "no disk writes of payloads" rule. The diskless path is a normal-mode `Workbook` plus a hard `MAX_EXPORT_ROWS` cap (default e.g. 100k → 400 instead of OOM), which bounds peak memory without touching disk. The memory-light temp-file route is only acceptable under an explicit documented exception (roadmap D6). Note that even `write_only=True` does not eliminate the final `save()` zip assembly.
 - Deliver via `send_file`/`Response(iter)`; do **not** `output.getvalue()` the whole buffer into memory.
-- For CSV: use a generator-based `Response` that yields rows (`csv` writer needs a text wrapper — yield `''.join`-chunked or use `io.StringIO` flush per N rows). Keep `extrasaction='ignore'` and the F1 sanitization.
-- Add an export row-count guard (`MAX_EXPORT_ROWS`, default e.g. 100k) → 400 with a clear message instead of OOM.
+- For CSV: use a generator-based `Response` that yields rows (`csv` writer needs a text wrapper — yield `''.join`-chunked or use `io.StringIO` flush per N rows). CSV is natively streamable with no temp files. Keep `extrasaction='ignore'` and the F1 sanitization.
 
 **Effort:** 2h. **Verification:** export 100k rows and measure RSS **during generation and during response delivery** — do not infer bounded memory from a missing `Content-Length` or chunked transfer, since those only indicate streaming, not peak usage.
 
@@ -199,7 +197,7 @@ The app's heavy operations are all in `/process` (parse + flatten + full-dataset
 | ID | Finding | Severity | Remediation | Effort |
 |---|---|---|---|---|
 | P1 | No response compression | High | gzip middleware (guards + Content-Length fix) | 1h |
-| P3 | XLSX/CSV fully buffered | High | `write_only` + explicit spool/memory cap + generator; row guard | 2h |
+| P3 | XLSX/CSV fully buffered | High | Diskless capped export (or D6 temp-file exception); generator | 2h |
 | P2 | Full dataset shipped per request | Medium | P1 + preview truncation + lazy render (design-constrained) | 1h + feature |
 | P4 | Eager tree-picker DOM | Medium | Lazy children build + caps | 2h |
 | P5 | Unbounded nested-cell render | Medium | Non-mutating preview projection + client caps | 1-2h |
@@ -235,6 +233,7 @@ The latency target explicitly **excludes API-fetch requests** — those are boun
 ## 5. Design Constraints That Bound the Fixes
 
 - **No server-side payload persistence** (`MEMORY.md` 2026-05-12): the full-dataset-in-`/process`-response design must not be replaced with server-side caching/sessions for export. All fixes must respect this (compression, streaming, client-side lazy rendering are compatible; a server-side export token is not).
+- **No disk writes of payloads** (`AGENTS.md`): export buffering must not rely on OS temp files. openpyxl `write_only` mode and `SpooledTemporaryFile` are therefore off the table unless a documented exception (roadmap D6) is approved.
 - **No frontend framework / build step**: all client fixes are vanilla JS.
 - **Strict CSP, no inline JS**: any new client code stays in `static/js/app.js`.
 - **Exact-pinned dependencies**: any new dependency (e.g. `Flask-Compress`) must be pinned exactly and added deliberately; the zero-dependency middleware is preferred.

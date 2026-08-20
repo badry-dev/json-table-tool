@@ -170,10 +170,10 @@ Build the CSP as a list of directives (or keep the trailing `;` in the base stri
 **Description:** `SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')`. If an operator forgets to set it (README calls it "Required: Yes"), the app silently runs with a *publicly known* key: CSRF tokens are forgeable and the session cookie can be signed. `render.yaml` sets `generateValue: true`, but self-hosted / Docker deploys from README rely on the operator.
 
 **Remediation:**
-- In `create_app()`, after config load: if `DEBUG` is False and `SECRET_KEY` equals the dev default (or is `None`/empty), `raise RuntimeError('SECRET_KEY must be set in production')`.
+- In `create_app()`, after config load: when an **explicit production signal** (`APP_ENV=production` or `PRODUCTION=true`) is set and `SECRET_KEY` equals the dev default (or is `None`/empty), `raise RuntimeError('SECRET_KEY must be set in production')`. Do **not** infer production from `not DEBUG` — the documented local run `python app.py` has `DEBUG=False` by default, and gating on it would block ordinary development startup.
 - Also validate that config integers are actually integers (env typo like `MAX_UPLOAD_SIZE=abc` currently raises `ValueError` at import time with a confusing traceback; wrap with clear messages).
 
-**Effort:** 30m. **Tests:** with `FLASK_DEBUG=0` and `SECRET_KEY` unset (so the dev default applies), call `create_app()` through the real factory and assert `RuntimeError`; set a valid `SECRET_KEY` (or keep the `TESTING=True` fixture bypass) and assert startup succeeds. Do not construct `Config(SECRET_KEY=...)` — `Config` is a class with class attributes, not a constructor; drive behavior via environment variables or `app.config` mutation after load.
+**Effort:** 30m. **Tests:** with `APP_ENV=production` and `SECRET_KEY` unset (dev default), call `create_app()` through the real factory and assert `RuntimeError`; with `APP_ENV` unset (local dev), the same default key starts successfully; a valid `SECRET_KEY` under `APP_ENV=production` also starts. Do not construct `Config(SECRET_KEY=...)` — `Config` is a class with class attributes, not a constructor; drive behavior via environment variables or `app.config` mutation after load.
 
 ---
 
@@ -283,7 +283,7 @@ Build the CSP as a list of directives (or keep the trailing `;` in the base stri
 
 **Description:** Flask 3.x cookie defaults are `HttpOnly=True`, `SameSite=None` (no `SameSite` attribute emitted; browsers then apply `Lax`), and `Secure=False`. `Secure` is **not** auto-enabled by `request.is_secure` — it must be set explicitly, and correct detection behind a TLS-terminating proxy requires ProxyFix (F12). Given no server-side sessions are used, the CSRF token is the real secret — still worth locking down.
 
-**Remediation:** Set explicitly: `SESSION_COOKIE_HTTPONLY = True`, `SESSION_COOKIE_SAMESITE = 'Lax'`, `SESSION_COOKIE_SECURE = not DEBUG` (coupled with ProxyFix from F12 so `is_secure` is correct). Optionally `WTF_CSRF_SSL_STRICT`.
+**Remediation:** Set explicitly: `SESSION_COOKIE_HTTPONLY = True`, `SESSION_COOKIE_SAMESITE = 'Lax'`, and `SESSION_COOKIE_SECURE` tied to the **explicit production signal** (`APP_ENV=production`), not `not DEBUG` — a plain local run has `DEBUG=False` and would otherwise send `Secure` cookies over HTTP, breaking CSRF-protected POSTs. Couple secure-request detection with ProxyFix from F12 where needed. Optionally `WTF_CSRF_SSL_STRICT`.
 
 **Effort:** 20m. **Tests:** config assertions.
 
@@ -332,7 +332,7 @@ Build the CSP as a list of directives (or keep the trailing `;` in the base stri
 - [ ] **F6 (IPs)** SSRF: `http://127.0.0.1`, `http://169.254.169.254`, `http://2130706433`, `http://[::ffff:7f00:1]`, `http://0x7f000001` all → 400.
 - [ ] **F6 (DNS)** Slow-DNS hostname (mock) does not block a worker beyond the configured DNS timeout; concurrent lookups respect the in-flight limit.
 - [ ] **F6 (ports)** API fetch to `http://public.example.com:22` / `:6379` → 400 (port allowlist `80,443,8443`).
-- [ ] **F7** A POST without CSRF token → 400; with the dev SECRET_KEY default and `DEBUG=False`, `create_app()` refuses to start.
+- [ ] **F7** A POST without CSRF token → 400; with the dev SECRET_KEY default and `APP_ENV=production`, `create_app()` refuses to start (plain local run without `APP_ENV` still starts).
 - [ ] **F8** 1500-deep JSON → 400 (`'JSON nesting too deep'`), not 500.
 - [ ] **F9** API-fetch of malformed JSONL → 400 with generic message; the ValueError is not logged (`caplog`).
 - [ ] **F10** >10 MB POST → JSON 413 (not HTML).
@@ -341,6 +341,6 @@ Build the CSP as a list of directives (or keep the trailing `;` in the base stri
 - [ ] **F13** Upload `evil.txt` or a non-JSON content-type → 400.
 - [ ] **F14** Deployment docs state HTTPS is required on every path; CSP includes `upgrade-insecure-requests` (manual sign-off).
 - [ ] **F15** `/health` still returns `version` by default; `HEALTH_REVEAL_VERSION=0` hides it (config test).
-- [ ] **F16** Session cookie flags: `HttpOnly`, `SameSite=Lax`, `Secure` in non-debug (assert `Set-Cookie`).
+- [ ] **F16** Session cookie flags: `HttpOnly`, `SameSite=Lax`, `Secure` under `APP_ENV=production` and **not** on a plain local run (assert `Set-Cookie`).
 - [ ] **F17** Docs scan: no stale `candidates`/MIT references in `MEMORY.md`/`CLAUDE.md`/`AGENTS.md`/`README.md` (manual sign-off).
 - [ ] **F5** Response headers: HSTS (secure requests), `Permissions-Policy`, `COOP`, `CRP`, extended CSP (`object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`).
