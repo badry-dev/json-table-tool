@@ -830,6 +830,9 @@ class TestIntegerConfigValidation:
         'API_FETCH_TIMEOUT',
         'API_FETCH_MAX_RESPONSE',
         'FLATTEN_MAX_DEPTH',
+        'API_DNS_TIMEOUT',
+        'API_DNS_MAX_WORKERS',
+        'API_DNS_ADMISSION_TIMEOUT',
     ]
 
     def test_each_integer_setting_reports_a_clear_error(self, fresh_config):

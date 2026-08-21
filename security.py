@@ -1,10 +1,13 @@
 """Security utilities: SSRF protection and response headers."""
 
+import concurrent.futures
 import ipaddress
+import os
 import socket
+import threading
 from urllib.parse import urlparse
 
-from flask import request
+from flask import current_app, has_app_context, request
 
 # Built as a list of directives so appending can never fuse two tokens into one
 # malformed directive (F5). Google Fonts is the only third-party origin the page
@@ -29,6 +32,151 @@ CSP_DIRECTIVES = (
 CONTENT_SECURITY_POLICY = '; '.join(CSP_DIRECTIVES)
 
 
+# --- Bounded DNS admission (F6.1 / P7) --------------------------------------
+#
+# socket.getaddrinfo takes no timeout and cannot be cancelled, so a hostname
+# served by a slow or unresponsive nameserver pins the gunicorn worker that
+# called it for as long as the platform resolver takes. The lookup therefore runs
+# on a shared, fixed-size pool and the caller waits with a timeout.
+#
+# What this bounds and what it does not:
+#
+#   * Bounded: how long a REQUEST waits (Future.result timeout), and how many
+#     lookups may be in flight at once (the admission permits). Concurrency is
+#     the actual worker-starvation fix.
+#   * NOT bounded: the lookup itself, and therefore worker teardown. cancel_futures
+#     only drops queued work, a running getaddrinfo cannot be cancelled, and
+#     concurrent.futures joins its non-daemon threads at interpreter exit whatever
+#     `wait` says. The wait is whatever the platform resolver takes -- glibc
+#     defaults to ~5s per nameserver x 2 attempts x every nameserver in
+#     resolv.conf, so tens of seconds is the realistic worst case, and it is
+#     bounded at all only where `options timeout:N attempts:M` is configured.
+#     Pinning `options timeout:2 attempts:1` in the container's resolv.conf is a
+#     best-effort narrowing, not a guarantee. A killable subprocess resolver is
+#     the only real bound and is deliberately out of v1.2 scope.
+#
+# Do not describe teardown as bounded anywhere.
+
+DEFAULT_DNS_TIMEOUT = 3
+DEFAULT_DNS_MAX_WORKERS = 4
+DEFAULT_DNS_ADMISSION_TIMEOUT = 1
+
+
+class ResolverBusyError(Exception):
+    """No admission permit was free within the admission wait."""
+
+
+class _ResolverPool:
+    """A fixed-size resolver pool with an admission permit per in-flight lookup."""
+
+    def __init__(self, max_workers):
+        self.pid = os.getpid()
+        self.max_workers = max_workers
+        # Pool size plus an equal backlog: a bounded submission queue. Beyond this
+        # callers are rejected rather than queued without limit.
+        self.capacity = max_workers * 2
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix='dns-resolver'
+        )
+        self._permits = threading.Semaphore(self.capacity)
+        self._counter_lock = threading.Lock()
+        self.in_flight = 0
+
+    def submit(self, hostname, admission_timeout):
+        """
+        Admit and start one lookup, or raise ResolverBusyError.
+
+        The permit is taken BEFORE submit and released from the future's
+        done-callback -- never from the caller's finally. Releasing on caller
+        timeout would re-admit work while the blocked getaddrinfo thread still
+        occupies the pool, which is precisely how the pool saturates under
+        repeated slow-DNS requests.
+        """
+        if not self._permits.acquire(timeout=admission_timeout):
+            raise ResolverBusyError
+        with self._counter_lock:
+            self.in_flight += 1
+        try:
+            future = self.executor.submit(socket.getaddrinfo, hostname, None)
+        except BaseException:
+            self._release()
+            raise
+        future.add_done_callback(self._on_done)
+        return future
+
+    def _on_done(self, _future):
+        self._release()
+
+    def _release(self):
+        with self._counter_lock:
+            self.in_flight -= 1
+        self._permits.release()
+
+
+_pool_lock = threading.Lock()
+_pool = None
+
+
+def get_resolver_pool(max_workers=None):
+    """
+    Return this process's resolver pool, creating it on first use.
+
+    Creation is lazy so the pool belongs to the gunicorn WORKER, not the master:
+    an executor built at import time in the master leaves its threads behind in
+    the parent and is not usefully inherited. The recorded pid also makes a pool
+    inherited across a fork be replaced rather than reused.
+    """
+    global _pool
+    if max_workers is None:
+        max_workers = _setting('API_DNS_MAX_WORKERS', DEFAULT_DNS_MAX_WORKERS)
+    pool = _pool
+    if pool is not None and pool.pid == os.getpid():
+        return pool
+    with _pool_lock:
+        if _pool is None or _pool.pid != os.getpid():
+            _pool = _ResolverPool(max_workers)
+        return _pool
+
+
+def reset_resolver_pool():
+    """
+    Drop the current pool so the next lookup builds a fresh one.
+
+    shutdown(wait=False, cancel_futures=True) returns immediately but does NOT
+    make teardown bounded: it can only drop queued work, and any thread already
+    inside getaddrinfo keeps running until the platform resolver returns.
+    """
+    global _pool
+    with _pool_lock:
+        pool = _pool
+        _pool = None
+    if pool is not None:
+        pool.executor.shutdown(wait=False, cancel_futures=True)
+    return pool
+
+
+def _setting(name, default):
+    """Read a config value, falling back to the module default outside a request."""
+    if has_app_context():
+        return current_app.config.get(name, default)
+    return default
+
+
+def resolve_hostname(hostname):
+    """
+    Resolve a hostname under admission control.
+
+    Returns getaddrinfo's result, or raises ResolverBusyError (no permit),
+    TimeoutError (the caller's wait elapsed; the lookup itself keeps running) or
+    socket.gaierror.
+    """
+    pool = get_resolver_pool()
+    admission_timeout = _setting('API_DNS_ADMISSION_TIMEOUT', DEFAULT_DNS_ADMISSION_TIMEOUT)
+    timeout = _setting('API_DNS_TIMEOUT', DEFAULT_DNS_TIMEOUT)
+    future = pool.submit(hostname, admission_timeout)
+    return future.result(timeout=timeout)
+
+
 def validate_url(url):
     """
     Validate a URL for SSRF protection.
@@ -45,8 +193,14 @@ def validate_url(url):
         return False, 'Invalid URL: no hostname'
 
     try:
-        addr_infos = socket.getaddrinfo(hostname, None)
+        addr_infos = resolve_hostname(hostname)
+    except ResolverBusyError:
+        return False, 'DNS resolver is busy; please retry'
     except socket.gaierror:
+        return False, f'Could not resolve hostname: {hostname}'
+    except TimeoutError:
+        # The caller's wait elapsed. The lookup is still running on the pool and
+        # still holds its permit until it finishes -- that is deliberate.
         return False, f'Could not resolve hostname: {hostname}'
 
     found_valid = False

@@ -57,6 +57,14 @@ class Config:
     API_FETCH_MAX_RESPONSE = env_int('API_FETCH_MAX_RESPONSE', 10 * 1024 * 1024)
     FLATTEN_MAX_DEPTH = env_int('FLATTEN_MAX_DEPTH', 10)
 
+    # DNS admission control for API fetch (F6.1/P7). API_DNS_TIMEOUT bounds how
+    # long a REQUEST waits, not how long the lookup runs -- getaddrinfo exposes no
+    # timeout and cannot be cancelled. API_DNS_MAX_WORKERS bounds concurrency,
+    # which is the actual worker-starvation fix.
+    API_DNS_TIMEOUT = env_int('API_DNS_TIMEOUT', 3)
+    API_DNS_MAX_WORKERS = env_int('API_DNS_MAX_WORKERS', 4)
+    API_DNS_ADMISSION_TIMEOUT = env_int('API_DNS_ADMISSION_TIMEOUT', 1)
+
     # Rate limiting (Flask-Limiter reads RATELIMIT_* keys automatically)
     RATELIMIT_STORAGE_URI = 'memory://'
     RATELIMIT_DEFAULT = os.environ.get('RATE_LIMIT_DEFAULT', '120/minute')
