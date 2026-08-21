@@ -148,7 +148,7 @@ async function submitForm(jsonPath) {
         previewLimit = data.preview_limit || previewLimit;
         updateExcelAvailability();
 
-        renderTable(data.columns, data.preview, data.total_rows);
+        setTableData(data);
         showResults();
 
     } catch (err) {
@@ -187,6 +187,7 @@ function showTreePicker(rawJson) {
     treeContainer.innerHTML = '';
     treeContainer.appendChild(buildTreeNode(rawJson, '(root)', 'root', true));
     pathModal.classList.add('visible');
+    preselectPathFromHash();
 }
 
 function describeNode(value) {
@@ -318,8 +319,78 @@ function selectNode(row, path) {
     treeConfirmBtn.disabled = false;
 }
 
+// --- 4.5 deep-linkable path selection -------------------------------------
+//
+// #path=users.0.orders pre-selects that node when the picker opens, and
+// confirming a selection writes the hash back, so the link can be shared for a
+// conversion someone repeats.
+
+function readPathFromHash() {
+    const hash = (window.location.hash || '').replace(/^#/, '');
+    if (!hash) return null;
+    const match = new URLSearchParams(hash).get('path');
+    return match ? match.trim() : null;
+}
+
+function writePathToHash(path) {
+    const params = new URLSearchParams();
+    params.set('path', path);
+    window.location.hash = params.toString();
+}
+
+// Attribute selectors would need escaping for arbitrary JSON keys; scanning the
+// rows avoids the question entirely.
+function findTreeRowByPath(path) {
+    return (
+        Array.from(treeContainer.querySelectorAll('.tree-row[data-path]')).find(
+            row => row.dataset.path === path
+        ) || null
+    );
+}
+
+function expandTreeToPath(path) {
+    if (path === '(root)') {
+        const rootRow = findTreeRowByPath('(root)');
+        if (rootRow) selectNode(rootRow, '(root)');
+        return Boolean(rootRow);
+    }
+
+    let current = '';
+    let target = null;
+    for (const segment of path.split('.')) {
+        current = current ? `${current}.${segment}` : segment;
+        const row = findTreeRowByPath(current);
+        // Missing means the path does not exist, or the node sits past a lazy
+        // cap. Either way this is a hint, not a command -- leave the picker open.
+        if (!row) return false;
+
+        const children = row.parentElement.querySelector(':scope > .tree-children');
+        if (children) {
+            populateChildren(children);
+            children.classList.remove('hidden');
+            const toggle = row.querySelector('.tree-toggle');
+            if (toggle) toggle.textContent = '▾';
+        }
+        target = row;
+    }
+
+    if (target) {
+        selectNode(target, current);
+        target.scrollIntoView({ block: 'nearest' });
+        return true;
+    }
+    return false;
+}
+
+function preselectPathFromHash() {
+    const path = readPathFromHash();
+    if (!path) return;
+    expandTreeToPath(path);
+}
+
 treeConfirmBtn.addEventListener('click', () => {
     if (!selectedTreePath) return;
+    writePathToHash(selectedTreePath);
     pathModal.classList.remove('visible');
     submitForm(selectedTreePath);
 });
@@ -335,15 +406,115 @@ pathModal.addEventListener('click', (e) => {
     }
 });
 
-// Render table
-function renderTable(columns, rows, totalRows) {
-    currentColumns = columns;
-    currentRows = rows;
-    currentTotalRows = totalRows;
-    renderTableDOM(columns, rows, totalRows);
+// --- Table view model (4.1/4.2/4.4) ---------------------------------------
+//
+// Two datasets arrive from /process: `preview` (nested, capped server-side) with
+// its own `columns`, and `csv_data` (flattened, full fidelity) with
+// `csv_columns`. The table starts on the preview. "Load more" switches to the
+// flattened dataset -- that is the only one the browser holds for every row --
+// and the badge says so, because the column set genuinely differs (a nested
+// `meta` object becomes `meta.age`).
+
+// Above this many DOM rows the browser starts to struggle; "Load all" asks first.
+const MAX_DOM_ROWS = 50000;
+const LOAD_MORE_STEP = 500;
+
+let previewRows = null;
+let previewColumns = null;
+let viewMode = 'preview';
+let loadedRowCount = 0;
+let hiddenColumns = new Set();
+let filterText = '';
+
+const rowFilterInput = document.getElementById('rowFilter');
+const filterCount = document.getElementById('filterCount');
+const loadMoreBtn = document.getElementById('loadMoreBtn');
+const loadAllBtn = document.getElementById('loadAllBtn');
+const rowWarning = document.getElementById('rowWarning');
+const columnsBtn = document.getElementById('columnsBtn');
+const columnsDropdown = document.getElementById('columnsDropdown');
+
+function setTableData(data) {
+    previewColumns = data.columns || [];
+    previewRows = data.preview || [];
+    currentTotalRows = data.total_rows || 0;
+    viewMode = 'preview';
+    loadedRowCount = previewRows.length;
+    hiddenColumns = new Set();
+    filterText = '';
+    sortColumn = null;
+    sortDirection = 'asc';
+    if (rowFilterInput) rowFilterInput.value = '';
+    renderTable();
 }
 
-function renderTableDOM(columns, rows, totalRows) {
+function baseColumns() {
+    return (viewMode === 'preview' ? previewColumns : csvColumns) || [];
+}
+
+function baseRows() {
+    if (viewMode === 'preview') return previewRows || [];
+    return (csvData || []).slice(0, loadedRowCount);
+}
+
+function visibleColumns() {
+    return baseColumns().filter(col => !hiddenColumns.has(col));
+}
+
+function rowMatchesFilter(row, needle) {
+    return Object.values(row).some(value => {
+        if (value === null || value === undefined) return false;
+        const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        return text.toLowerCase().includes(needle);
+    });
+}
+
+function applyFilter(rows) {
+    const needle = filterText.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter(row => rowMatchesFilter(row, needle));
+}
+
+function compareValues(a, b, col) {
+    let valA = a[col];
+    let valB = b[col];
+
+    if (valA === null || valA === undefined) valA = '';
+    if (valB === null || valB === undefined) valB = '';
+
+    if (typeof valA === 'object') valA = JSON.stringify(valA);
+    if (typeof valB === 'object') valB = JSON.stringify(valB);
+
+    if (typeof valA === 'number' && typeof valB === 'number') {
+        return sortDirection === 'asc' ? valA - valB : valB - valA;
+    }
+
+    const strA = String(valA).toLowerCase();
+    const strB = String(valB).toLowerCase();
+    if (strA < strB) return sortDirection === 'asc' ? -1 : 1;
+    if (strA > strB) return sortDirection === 'asc' ? 1 : -1;
+    return 0;
+}
+
+function applySort(rows) {
+    if (!sortColumn) return rows;
+    return [...rows].sort((a, b) => compareValues(a, b, sortColumn));
+}
+
+// Render table
+function renderTable() {
+    const columns = visibleColumns();
+    const loaded = baseRows();
+    const filtered = applyFilter(loaded);
+    const rows = applySort(filtered);
+
+    renderTableDOM(columns, rows);
+    renderColumnToggles();
+    updateCounts(loaded.length, filtered.length);
+    updateLoadControls();
+}
+
+function renderTableDOM(columns, rows) {
     tableHead.innerHTML = '';
     tableBody.innerHTML = '';
 
@@ -361,37 +532,151 @@ function renderTableDOM(columns, rows, totalRows) {
     });
     tableHead.appendChild(headerRow);
 
-    // Body
+    // Body. One fragment, so a large "load all" is a single reflow.
+    const fragment = document.createDocumentFragment();
     rows.forEach(row => {
         const tr = document.createElement('tr');
         columns.forEach(col => {
             const td = document.createElement('td');
-            const value = row[col];
-            td.innerHTML = formatValue(value);
+            td.innerHTML = formatValue(row[col]);
             tr.appendChild(td);
         });
-        tableBody.appendChild(tr);
+        fragment.appendChild(tr);
     });
+    tableBody.appendChild(fragment);
+}
 
-    // Update counts
-    rowCountText.textContent = `${totalRows} total rows`;
-    if (rows.length < totalRows) {
-        previewBadge.textContent = `Showing first ${rows.length}`;
-        // Sorting reorders only the rows currently in the table, while exports
+function updateCounts(loadedCount, shownCount) {
+    rowCountText.textContent = `${currentTotalRows} total rows`;
+
+    if (filterCount) {
+        filterCount.textContent = filterText.trim()
+            ? `${shownCount} of ${loadedCount} loaded rows match`
+            : '';
+    }
+
+    if (loadedCount < currentTotalRows) {
+        previewBadge.textContent = `Showing first ${loadedCount}`;
+        // Sorting and filtering act on the rows currently loaded, while exports
         // always contain every row -- say so rather than leaving the discrepancy
         // invisible (P11).
         previewBadge.title =
-            `Preview limit is ${previewLimit}. Sorting applies to the rows shown here; ` +
-            'exports always contain all rows.';
+            `Preview limit is ${previewLimit}. Sorting and filtering apply to the ` +
+            'rows loaded here; exports always contain all rows.';
         previewBadge.classList.remove('hidden');
     } else {
-        previewBadge.textContent = `Showing all ${totalRows}`;
-        previewBadge.title = '';
-        previewBadge.classList.add('hidden');
+        previewBadge.textContent =
+            viewMode === 'full'
+                ? `Showing all ${currentTotalRows} (flattened columns)`
+                : `Showing all ${currentTotalRows}`;
+        previewBadge.title =
+            viewMode === 'full'
+                ? 'Rows past the preview come from the flattened dataset, so nested '
+                  + 'objects appear as dotted columns.'
+                : '';
+        if (viewMode === 'full') {
+            previewBadge.classList.remove('hidden');
+        } else {
+            previewBadge.classList.add('hidden');
+        }
     }
 }
 
-// Column sorting (client-side on preview rows)
+function updateLoadControls() {
+    const total = currentTotalRows;
+    const moreAvailable = loadedRowCount < total;
+    if (loadMoreBtn) {
+        loadMoreBtn.disabled = !moreAvailable;
+        loadMoreBtn.textContent = moreAvailable
+            ? `Load next ${Math.min(LOAD_MORE_STEP, total - loadedRowCount)}`
+            : 'All rows loaded';
+    }
+    if (loadAllBtn) loadAllBtn.disabled = !moreAvailable;
+}
+
+function showRowWarning(message) {
+    if (!rowWarning) return;
+    if (!message) {
+        rowWarning.classList.add('hidden');
+        rowWarning.textContent = '';
+        return;
+    }
+    rowWarning.textContent = message;
+    rowWarning.classList.remove('hidden');
+}
+
+function loadRows(count) {
+    if (!csvData) return;
+    // Rows past the preview only exist in the flattened dataset.
+    viewMode = 'full';
+    const target = Math.min(loadedRowCount + count, csvData.length);
+
+    if (target > MAX_DOM_ROWS) {
+        loadedRowCount = Math.min(target, MAX_DOM_ROWS);
+        showRowWarning(
+            `Rendering stops at ${MAX_DOM_ROWS} rows to keep the page responsive. ` +
+            `All ${currentTotalRows} rows are still included in every export.`
+        );
+    } else {
+        loadedRowCount = target;
+        showRowWarning('');
+    }
+    renderTable();
+}
+
+if (loadMoreBtn) loadMoreBtn.addEventListener('click', () => loadRows(LOAD_MORE_STEP));
+if (loadAllBtn) {
+    loadAllBtn.addEventListener('click', () => loadRows(Number.MAX_SAFE_INTEGER));
+}
+
+if (rowFilterInput) {
+    rowFilterInput.addEventListener('input', () => {
+        filterText = rowFilterInput.value;
+        renderTable();
+    });
+}
+
+// --- Column visibility (4.4) ----------------------------------------------
+function renderColumnToggles() {
+    if (!columnsDropdown) return;
+    columnsDropdown.innerHTML = '';
+    baseColumns().forEach(col => {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !hiddenColumns.has(col);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) {
+                hiddenColumns.delete(col);
+            } else {
+                hiddenColumns.add(col);
+            }
+            renderTable();
+        });
+        const text = document.createElement('span');
+        text.textContent = col;
+        label.appendChild(checkbox);
+        label.appendChild(text);
+        columnsDropdown.appendChild(label);
+    });
+}
+
+if (columnsBtn) {
+    columnsBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = columnsDropdown.classList.toggle('visible');
+        columnsBtn.setAttribute('aria-expanded', String(open));
+    });
+}
+
+document.addEventListener('click', (e) => {
+    if (columnsDropdown && !e.target.closest('.column-group')) {
+        columnsDropdown.classList.remove('visible');
+        if (columnsBtn) columnsBtn.setAttribute('aria-expanded', 'false');
+    }
+});
+
+// Column sorting (client-side, over the rows currently loaded)
 function handleSort(col) {
     if (sortColumn === col) {
         sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
@@ -399,29 +684,7 @@ function handleSort(col) {
         sortColumn = col;
         sortDirection = 'asc';
     }
-
-    const sorted = [...currentRows].sort((a, b) => {
-        let valA = a[col];
-        let valB = b[col];
-
-        if (valA === null || valA === undefined) valA = '';
-        if (valB === null || valB === undefined) valB = '';
-
-        if (typeof valA === 'object') valA = JSON.stringify(valA);
-        if (typeof valB === 'object') valB = JSON.stringify(valB);
-
-        if (typeof valA === 'number' && typeof valB === 'number') {
-            return sortDirection === 'asc' ? valA - valB : valB - valA;
-        }
-
-        const strA = String(valA).toLowerCase();
-        const strB = String(valB).toLowerCase();
-        if (strA < strB) return sortDirection === 'asc' ? -1 : 1;
-        if (strA > strB) return sortDirection === 'asc' ? 1 : -1;
-        return 0;
-    });
-
-    renderTableDOM(currentColumns, sorted, currentTotalRows);
+    renderTable();
 }
 
 // P5: a nested object with 50k keys, a 100k-item array stringified whole, or a
@@ -569,21 +832,69 @@ function updateExcelAvailability() {
 
 // Export dropdown toggle
 const exportDropdown = document.getElementById('exportDropdown');
+
+function setExportDropdownOpen(open) {
+    exportDropdown.classList.toggle('visible', open);
+    exportBtn.setAttribute('aria-expanded', String(open));
+}
+
 exportBtn.addEventListener('click', () => {
-    exportDropdown.classList.toggle('visible');
+    setExportDropdownOpen(!exportDropdown.classList.contains('visible'));
 });
 
 // Close dropdown when clicking outside
 document.addEventListener('click', (e) => {
     if (!e.target.closest('.export-group')) {
-        exportDropdown.classList.remove('visible');
+        setExportDropdownOpen(false);
     }
+});
+
+// Keyboard: Escape closes and returns focus to the trigger; arrows walk the menu.
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (exportDropdown.classList.contains('visible')) {
+        setExportDropdownOpen(false);
+        exportBtn.focus();
+    }
+    if (columnsDropdown && columnsDropdown.classList.contains('visible')) {
+        columnsDropdown.classList.remove('visible');
+        if (columnsBtn) {
+            columnsBtn.setAttribute('aria-expanded', 'false');
+            columnsBtn.focus();
+        }
+    }
+    if (aboutModal && aboutModal.classList.contains('visible')) {
+        aboutModal.classList.remove('visible');
+    }
+    if (pathModal.classList.contains('visible')) {
+        pathModal.classList.remove('visible');
+    }
+});
+
+exportDropdown.addEventListener('keydown', (e) => {
+    const items = Array.from(exportDropdown.querySelectorAll('.export-dropdown-item'));
+    const index = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        items[(index + 1) % items.length].focus();
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        items[(index - 1 + items.length) % items.length].focus();
+    }
+});
+
+exportBtn.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    setExportDropdownOpen(true);
+    const first = exportDropdown.querySelector('.export-dropdown-item');
+    if (first) first.focus();
 });
 
 // Export handlers
 document.querySelectorAll('.export-dropdown-item').forEach(item => {
     item.addEventListener('click', async () => {
-        exportDropdown.classList.remove('visible');
+        setExportDropdownOpen(false);
         const format = item.dataset.format;
 
         if (!csvData || !csvColumns) {
@@ -595,6 +906,18 @@ document.querySelectorAll('.export-dropdown-item').forEach(item => {
             downloadDelimited(csvColumns, csvData, ',', 'exported_data.csv');
         } else if (format === 'tsv') {
             downloadDelimited(csvColumns, csvData, '\t', 'exported_data.tsv');
+        } else if (format === 'jsonl') {
+            downloadChunks(
+                buildJsonlChunks(csvColumns, csvData),
+                'application/x-ndjson; charset=utf-8',
+                'exported_data.jsonl'
+            );
+        } else if (format === 'markdown') {
+            downloadChunks(
+                buildMarkdownChunks(csvColumns, csvData),
+                'text/markdown; charset=utf-8',
+                'exported_data.md'
+            );
         } else if (format === 'xlsx') {
             if (excelExportBlocked()) {
                 showError(
@@ -667,6 +990,74 @@ function buildDelimitedChunks(columns, data, delimiter) {
 
 function buildDelimited(columns, data, delimiter) {
     return buildDelimitedChunks(columns, data, delimiter).join('');
+}
+
+// --- 4.3 JSONL export -----------------------------------------------------
+//
+// Lossless: rows go out exactly as they arrived, with NO formula sanitization.
+// F1's sanitizer exists because CSV/TSV/XLSX have no type channel and a
+// spreadsheet re-interprets a leading '=' as a formula; JSON has types, nothing
+// evaluates it, and prefixing values here would corrupt the data instead of
+// protecting anything.
+function buildJsonlChunks(columns, data) {
+    const chunks = [];
+    let pending = '';
+    data.forEach((row, index) => {
+        const projected = {};
+        columns.forEach(col => {
+            if (row[col] !== undefined) projected[col] = row[col];
+        });
+        pending += JSON.stringify(projected) + '\n';
+        if ((index + 1) % BLOB_CHUNK_ROWS === 0) {
+            chunks.push(pending);
+            pending = '';
+        }
+    });
+    if (pending) chunks.push(pending);
+    return chunks;
+}
+
+// --- 4.3 Markdown export --------------------------------------------------
+//
+// Markdown-specific escaping only, again NOT the spreadsheet sanitizer: a
+// leading '=' is inert in Markdown. What does break a Markdown table is an
+// unescaped pipe or a newline inside a cell.
+function escapeMarkdownCell(value) {
+    if (value === null || value === undefined) return '';
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return text
+        .replace(/\\/g, '\\\\')
+        .replace(/\|/g, '\\|')
+        .replace(/\r\n|\r|\n/g, '<br>');
+}
+
+function buildMarkdownChunks(columns, data) {
+    const chunks = [];
+    let pending =
+        '| ' + columns.map(escapeMarkdownCell).join(' | ') + ' |\n' +
+        '| ' + columns.map(() => '---').join(' | ') + ' |\n';
+
+    data.forEach((row, index) => {
+        pending += '| ' + columns.map(col => escapeMarkdownCell(row[col])).join(' | ') + ' |\n';
+        if ((index + 1) % BLOB_CHUNK_ROWS === 0) {
+            chunks.push(pending);
+            pending = '';
+        }
+    });
+    if (pending) chunks.push(pending);
+    return chunks;
+}
+
+function downloadChunks(chunks, mimeType, filename) {
+    const blob = new Blob(chunks, { type: mimeType });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    a.remove();
 }
 
 // Client-side CSV/TSV generation
@@ -751,10 +1142,23 @@ themeToggle.addEventListener('click', () => {
     applyTheme(next);
 });
 
-// About link
+// About dialog. Replaces alert(), which also hardcoded a version string that
+// went stale the moment APP_VERSION changed -- the modal reads it from config.
+const aboutModal = document.getElementById('aboutModal');
+
 document.getElementById('aboutLink').addEventListener('click', (e) => {
     e.preventDefault();
-    alert('JSON Table Converter v1.1.0\n\nBuilt with Flask + Python\nNo data is ever stored or logged.');
+    aboutModal.classList.add('visible');
+});
+
+document.getElementById('aboutClose').addEventListener('click', () => {
+    aboutModal.classList.remove('visible');
+});
+
+aboutModal.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+        e.currentTarget.classList.remove('visible');
+    }
 });
 
 // UI helpers

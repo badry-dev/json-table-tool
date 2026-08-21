@@ -1742,3 +1742,85 @@ class TestProcessResponseShape:
         lines = source.splitlines()[node.lineno - 1 : node.end_lineno]
         code_lines = [ln for ln in lines if ln.strip() and not ln.strip().startswith('#')]
         assert len(code_lines) <= 50, f'process_json is {len(code_lines)} code lines'
+
+
+class TestHealthSplit:
+    """4.7 - /health/live and /health/ready for load-balancer checks."""
+
+    def test_original_health_is_unchanged(self, client, app):
+        data = json.loads(client.get('/health').data)
+        assert data == {'status': 'ok', 'version': app.config['APP_VERSION']}
+
+    def test_live_reports_the_process_only(self, client, app):
+        response = client.get('/health/live')
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['status'] == 'ok'
+        assert data['version'] == app.config['APP_VERSION']
+        # Liveness must not depend on anything that could fail, or a dependency
+        # outage turns into a restart loop.
+        assert 'checks' not in data
+
+    def test_ready_reports_dependencies(self, client):
+        response = client.get('/health/ready')
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['status'] == 'ok'
+        assert data['checks'] == {'rate_limit_storage': 'ok', 'xlsx_writer': 'ok'}
+        assert data['rate_limit_storage_backend'] == 'memory'
+
+    def test_ready_returns_503_when_a_dependency_is_down(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.side_effect = RuntimeError('redis down')
+            response = client.get('/health/ready')
+
+        assert response.status_code == 503
+        data = json.loads(response.data)
+        assert data['status'] == 'degraded'
+        assert data['checks']['rate_limit_storage'] == 'unavailable'
+        # The reason stays in the logs, not the body.
+        assert 'redis down' not in response.get_data(as_text=True)
+
+    def test_health_endpoints_are_no_store(self, client):
+        for url in ('/health', '/health/live', '/health/ready'):
+            assert client.get(url).headers['Cache-Control'] == 'no-store', url
+
+    def test_version_gate_applies_to_all_three(self, fresh_config):
+        cfg = fresh_config(HEALTH_REVEAL_VERSION='0')
+        app = create_app(cfg)
+        for url in ('/health', '/health/live', '/health/ready'):
+            assert 'version' not in json.loads(app.test_client().get(url).data), url
+
+
+class TestExportDropdownMarkup:
+    """4.3 / 4.8 - the new formats and the accessibility attributes are present."""
+
+    def test_new_export_formats_are_offered(self, client):
+        html = client.get('/').data.decode('utf-8')
+        for fmt in ('csv', 'tsv', 'jsonl', 'markdown', 'xlsx'):
+            assert f'data-format="{fmt}"' in html, fmt
+
+    def test_dropdown_is_keyboard_accessible(self, client):
+        html = client.get('/').data.decode('utf-8')
+        assert 'aria-haspopup="true"' in html
+        assert 'aria-expanded="false"' in html
+        assert 'role="menu"' in html
+        assert 'role="menuitem"' in html
+
+    def test_about_modal_replaces_alert(self, client, app):
+        html = client.get('/').data.decode('utf-8')
+        assert 'id="aboutModal"' in html
+        # The version comes from config, not a hardcoded string that goes stale.
+        assert app.config['APP_VERSION'] in html
+
+    def test_no_inline_script_or_style(self, client):
+        """CSP has no unsafe-inline, so an inline handler would simply not run."""
+        html = client.get('/').data.decode('utf-8')
+        assert '<script>' not in html
+        assert 'onclick=' not in html
+        assert '<style' not in html
+
+    def test_table_toolbar_controls_exist(self, client):
+        html = client.get('/').data.decode('utf-8')
+        for element_id in ('rowFilter', 'loadMoreBtn', 'loadAllBtn', 'columnsBtn'):
+            assert f'id="{element_id}"' in html, element_id

@@ -39,5 +39,8 @@ jobs:
       - name: Client-side render/cap assertions (P4/P5/P13)
         run: node tests/js/test_render_caps.mjs
 
+      - name: Client-side feature assertions (Phase 4)
+        run: node tests/js/test_features.mjs
+
       - name: Audit runtime dependencies
         run: pip-audit -r requirements.txt

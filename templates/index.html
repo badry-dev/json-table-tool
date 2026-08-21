@@ -191,19 +191,40 @@
                     </div>
                 </div>
                 <div class="export-group">
-                    <button class="btn btn-export" id="exportBtn">
+                    <button class="btn btn-export" id="exportBtn" type="button"
+                            aria-haspopup="true" aria-expanded="false" aria-controls="exportDropdown">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                         </svg>
                         Export
                     </button>
-                    <div class="export-dropdown" id="exportDropdown">
-                        <button class="export-dropdown-item" data-format="csv">Export CSV</button>
-                        <button class="export-dropdown-item" data-format="tsv">Export TSV</button>
-                        <button class="export-dropdown-item" data-format="xlsx">Export Excel</button>
+                    <div class="export-dropdown" id="exportDropdown" role="menu" aria-labelledby="exportBtn">
+                        <button class="export-dropdown-item" type="button" role="menuitem" data-format="csv">Export CSV</button>
+                        <button class="export-dropdown-item" type="button" role="menuitem" data-format="tsv">Export TSV</button>
+                        <button class="export-dropdown-item" type="button" role="menuitem" data-format="jsonl">Export JSONL</button>
+                        <button class="export-dropdown-item" type="button" role="menuitem" data-format="markdown">Export Markdown</button>
+                        <button class="export-dropdown-item" type="button" role="menuitem" data-format="xlsx">Export Excel</button>
                     </div>
                 </div>
             </div>
+            <div class="table-toolbar">
+                <div class="table-toolbar-group">
+                    <label class="visually-hidden" for="rowFilter">Filter rows</label>
+                    <input type="search" id="rowFilter" class="row-filter"
+                           placeholder="Filter rows (case-insensitive)" autocomplete="off">
+                    <span class="filter-count" id="filterCount"></span>
+                </div>
+                <div class="table-toolbar-group">
+                    <button class="btn btn-secondary btn-small" type="button" id="loadMoreBtn">Load next 500</button>
+                    <button class="btn btn-secondary btn-small" type="button" id="loadAllBtn">Load all</button>
+                    <div class="column-group">
+                        <button class="btn btn-secondary btn-small" type="button" id="columnsBtn"
+                                aria-haspopup="true" aria-expanded="false" aria-controls="columnsDropdown">Columns</button>
+                        <div class="column-dropdown" id="columnsDropdown" role="menu" aria-labelledby="columnsBtn"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="row-warning hidden" id="rowWarning"></div>
             <div class="table-wrapper">
                 <table id="dataTable">
                     <thead id="tableHead"></thead>
@@ -215,6 +236,20 @@
         <footer>
             <p>Data is processed in-memory only. Nothing is stored. <a href="#" id="aboutLink">About</a></p>
         </footer>
+    </div>
+
+    <!-- About modal (replaces alert(), which CSP-safe code should not rely on) -->
+    <div class="modal-overlay" id="aboutModal">
+        <div class="modal">
+            <div class="modal-title">JSON &rarr; Table Converter</div>
+            <div class="modal-subtitle">
+                <p>Version <span id="aboutVersion">{{ config.APP_VERSION }}</span></p>
+                <p>Built with Flask + Python. No data is ever stored or logged.</p>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-primary" id="aboutClose">Close</button>
+            </div>
+        </div>
     </div>
 
     <!-- Path selector modal (JSON tree) -->

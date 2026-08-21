@@ -79,6 +79,9 @@ export function createContext() {
         console,
         setTimeout,
         clearTimeout,
+        // Web platform globals app.js uses that Node also provides.
+        URLSearchParams,
+        JSON,
     };
     context.globalThis = context;
     return context;

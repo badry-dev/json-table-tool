@@ -41,6 +41,8 @@ NO_STORE_ENDPOINTS = frozenset(
         'main.export_csv',
         'main.export_xlsx',
         'main.health',
+        'main.health_live',
+        'main.health_ready',
     }
 )
 

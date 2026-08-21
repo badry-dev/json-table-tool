@@ -110,13 +110,60 @@ def index():
     return render_template('index.html')
 
 
-@bp.route('/health')
-def health():
-    """Health check endpoint."""
-    payload = {'status': 'ok'}
+def _health_payload(status='ok', **extra):
+    payload = {'status': status}
     if current_app.config.get('HEALTH_REVEAL_VERSION', True):
         payload['version'] = current_app.config['APP_VERSION']
-    return jsonify(payload)
+    payload.update(extra)
+    return payload
+
+
+@bp.route('/health')
+def health():
+    """Health check endpoint (unchanged contract)."""
+    return jsonify(_health_payload())
+
+
+@bp.route('/health/live')
+def health_live():
+    """
+    Liveness: is the process up at all?
+
+    Deliberately does no dependency work, so a restart loop caused by a failing
+    dependency check is impossible.
+    """
+    return jsonify(_health_payload())
+
+
+@bp.route('/health/ready')
+def health_ready():
+    """
+    Readiness: is this process able to serve traffic?
+
+    Checks only what is cheap and local -- that the rate limiter has usable
+    storage and that the Excel writer imported. Returns 503 when it cannot serve,
+    so a load balancer takes it out of rotation rather than sending it requests.
+    """
+    checks = {}
+
+    storage_uri = current_app.config.get('RATELIMIT_STORAGE_URI', 'memory://')
+    try:
+        limiter.storage.check()
+        checks['rate_limit_storage'] = 'ok'
+    except Exception:
+        # The URI is config, not payload, but keep the reason out of the body.
+        logger.warning('Rate-limit storage check failed')
+        checks['rate_limit_storage'] = 'unavailable'
+
+    checks['xlsx_writer'] = 'ok' if Workbook is not None else 'unavailable'
+
+    ready = all(value == 'ok' for value in checks.values())
+    payload = _health_payload(
+        status='ok' if ready else 'degraded',
+        checks=checks,
+        rate_limit_storage_backend=storage_uri.split(':', 1)[0],
+    )
+    return jsonify(payload), (200 if ready else 503)
 
 
 def _build_api_auth(auth_method):
