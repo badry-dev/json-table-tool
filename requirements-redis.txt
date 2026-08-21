@@ -1,0 +1,10 @@
+# Optional: the client Flask-Limiter needs for a shared RATELIMIT_STORAGE_URI.
+#
+# Install this ONLY when running more than one gunicorn worker or more than one
+# replica, i.e. when RATELIMIT_STORAGE_URI is set to redis://...  The default
+# single-worker / single-instance deployment uses memory:// and does not need it.
+#
+#   pip install -r requirements.txt -r requirements-redis.txt
+-r requirements.txt
+
+redis==8.1.0
