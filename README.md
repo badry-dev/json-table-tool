@@ -4,7 +4,7 @@ A lightweight web tool to convert JSON data into viewable tables with CSV export
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![Flask](https://img.shields.io/badge/Flask-3.0-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+![License](https://img.shields.io/badge/License-GPL--3.0-yellow)
 
 ## Features
 
@@ -433,7 +433,7 @@ python -m pytest tests/ -v
 
 ## License
 
-MIT License - Feel free to modify and use internally.
+GNU General Public License v3.0 — see [`LICENSE`](LICENSE) for the full text.
 
 ---
 
