@@ -146,7 +146,7 @@ class Config:
     GZIP_MIN_SIZE = env_int('GZIP_MIN_SIZE', 1024)
 
     # Application metadata
-    APP_VERSION = '1.1.0'
+    APP_VERSION = '1.2.0'
 
     # F15: /health returns `version` by default (the existing contract). Operators
     # who would rather not advertise it can set HEALTH_REVEAL_VERSION=0.
