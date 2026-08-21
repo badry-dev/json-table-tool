@@ -850,6 +850,15 @@ class TestIntegerConfigValidation:
         cfg = fresh_config(PREVIEW_ROW_LIMIT=' 7 ')
         assert cfg.PREVIEW_ROW_LIMIT == 7
 
+    def test_port_allowlist_reports_a_clear_error(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS must be a comma-separated'):
+            fresh_config(API_ALLOWED_PORTS='80,https')
+        fresh_config(API_ALLOWED_PORTS=None)
+
+    def test_port_allowlist_is_parsed(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS=' 80 , 8443 ')
+        assert sorted(cfg.API_ALLOWED_PORTS) == [80, 8443]
+
 
 class TestRecursionDepth:
     """F8 - a pathologically nested document is a 400, never a 500."""

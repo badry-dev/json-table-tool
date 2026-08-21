@@ -57,6 +57,9 @@ CONTENT_SECURITY_POLICY = '; '.join(CSP_DIRECTIVES)
 #
 # Do not describe teardown as bounded anywhere.
 
+DEFAULT_ALLOWED_PORTS = frozenset({80, 443, 8443})
+DEFAULT_SCHEME_PORTS = {'http': 80, 'https': 443}
+
 DEFAULT_DNS_TIMEOUT = 3
 DEFAULT_DNS_MAX_WORKERS = 4
 DEFAULT_DNS_ADMISSION_TIMEOUT = 1
@@ -191,6 +194,20 @@ def validate_url(url):
     hostname = parsed.hostname
     if not hostname:
         return False, 'Invalid URL: no hostname'
+
+    # Port check first: it is free, and a rejected URL should not cost a lookup.
+    try:
+        port = parsed.port
+    except ValueError:
+        return False, 'Invalid URL: malformed port'
+    if port is None:
+        port = DEFAULT_SCHEME_PORTS[parsed.scheme]
+    allowed_ports = _setting('API_ALLOWED_PORTS', DEFAULT_ALLOWED_PORTS)
+    if allowed_ports and port not in allowed_ports:
+        return False, (
+            f'Port {port} is not allowed. Allowed ports: '
+            + ', '.join(str(p) for p in sorted(allowed_ports))
+        )
 
     try:
         addr_infos = resolve_hostname(hostname)

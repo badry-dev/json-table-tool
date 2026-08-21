@@ -43,6 +43,19 @@ def env_int(name, default):
         raise RuntimeError(f'Environment variable {name} must be an integer, got {raw!r}') from None
 
 
+def env_int_set(name, default):
+    """Read a comma-separated integer list (e.g. an allowlist of ports)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == '':
+        raw = default
+    try:
+        return frozenset(int(part.strip()) for part in raw.split(',') if part.strip())
+    except ValueError:
+        raise RuntimeError(
+            f'Environment variable {name} must be a comma-separated list of integers, got {raw!r}'
+        ) from None
+
+
 class Config:
     """Flask configuration with env var overrides."""
 
@@ -64,6 +77,11 @@ class Config:
     API_DNS_TIMEOUT = env_int('API_DNS_TIMEOUT', 3)
     API_DNS_MAX_WORKERS = env_int('API_DNS_MAX_WORKERS', 4)
     API_DNS_ADMISSION_TIMEOUT = env_int('API_DNS_ADMISSION_TIMEOUT', 1)
+
+    # Ports the API-fetch feature may connect to (F6.2/D5). Only the IP was
+    # checked before, so http://public.example.com:22 or :6379 passed. An empty
+    # value disables the check.
+    API_ALLOWED_PORTS = env_int_set('API_ALLOWED_PORTS', '80,443,8443')
 
     # Rate limiting (Flask-Limiter reads RATELIMIT_* keys automatically)
     RATELIMIT_STORAGE_URI = 'memory://'

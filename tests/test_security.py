@@ -250,3 +250,53 @@ class TestBoundedDnsAdmission:
         for thread in threads:
             thread.join(timeout=10)
         assert not any(thread.is_alive() for thread in threads)
+
+
+class TestPortAllowlist:
+    """F6.2 / D5 - only 80, 443 and 8443 by default."""
+
+    RESOLVED = [(2, 1, 6, '', ('93.184.216.34', 0))]
+
+    def test_blocks_non_http_ports(self):
+        with patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = self.RESOLVED
+            for port in (22, 25, 6379, 3306, 5432, 11211, 8080):
+                is_valid, error = validate_url(f'http://public.example.com:{port}/x')
+                assert not is_valid, f'port {port} was accepted'
+                assert f'Port {port} is not allowed' in error
+            # A rejected port must not cost a DNS lookup.
+            assert mock_dns.call_count == 0
+
+    def test_allows_the_default_ports(self):
+        with patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = self.RESOLVED
+            for url in (
+                'http://public.example.com:80/x',
+                'https://public.example.com:443/x',
+                'https://public.example.com:8443/x',
+            ):
+                assert validate_url(url)[0], url
+
+    def test_implicit_scheme_port_is_used(self):
+        with patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = self.RESOLVED
+            assert validate_url('http://public.example.com/x')[0]
+            assert validate_url('https://public.example.com/x')[0]
+
+    def test_malformed_port_rejected(self):
+        is_valid, error = validate_url('http://public.example.com:notaport/x')
+        assert not is_valid
+        assert 'port' in error.lower()
+
+    def test_allowlist_is_configurable(self, app):
+        with app.app_context(), patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = self.RESOLVED
+            app.config['API_ALLOWED_PORTS'] = frozenset({8080})
+            assert validate_url('http://public.example.com:8080/x')[0]
+            assert not validate_url('https://public.example.com/x')[0]
+
+    def test_empty_allowlist_disables_the_check(self, app):
+        with app.app_context(), patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = self.RESOLVED
+            app.config['API_ALLOWED_PORTS'] = frozenset()
+            assert validate_url('http://public.example.com:22/x')[0]
