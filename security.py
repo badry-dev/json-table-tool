@@ -4,6 +4,30 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+from flask import request
+
+# Built as a list of directives so appending can never fuse two tokens into one
+# malformed directive (F5). Google Fonts is the only third-party origin the page
+# uses; scripts stay self-only, so no inline JS is possible anywhere.
+CSP_DIRECTIVES = (
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    # Shrink the XSS blast radius: no plugins, no <base> hijacking, no framing,
+    # no cross-origin form exfiltration.
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    # Inert on a plain-http deployment, mandatory on an https one (F5/F14).
+    'upgrade-insecure-requests',
+)
+
+CONTENT_SECURITY_POLICY = '; '.join(CSP_DIRECTIVES)
+
 
 def validate_url(url):
     """
@@ -45,14 +69,19 @@ def validate_url(url):
 def apply_security_headers(response):
     """Add security headers to every response."""
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    # Legacy fallback for browsers predating CSP frame-ancestors.
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Content-Security-Policy'] = (
-        "default-src 'self'; "
-        "script-src 'self'; "
-        "style-src 'self' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self'"
-    )
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
+    response.headers['Content-Security-Policy'] = CONTENT_SECURITY_POLICY
+
+    # HSTS only makes sense once the connection is already TLS; sending it over
+    # plain http would pin a local dev server to https. request.is_secure reads
+    # X-Forwarded-Proto only when ProxyFix is enabled (TRUST_PROXY=1), which is
+    # exactly the deployment where the proxy terminates TLS.
+    if request.is_secure:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+
     return response

@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import re
 from unittest.mock import MagicMock, patch
 
 
@@ -422,6 +423,54 @@ class TestSecurityHeaders:
     def test_referrer_policy(self, client):
         response = client.get('/')
         assert 'strict-origin' in response.headers['Referrer-Policy']
+
+    def test_permissions_policy(self, client):
+        response = client.get('/')
+        policy = response.headers['Permissions-Policy']
+        assert 'camera=()' in policy
+        assert 'microphone=()' in policy
+        assert 'geolocation=()' in policy
+
+    def test_cross_origin_headers(self, client):
+        response = client.get('/')
+        assert response.headers['Cross-Origin-Opener-Policy'] == 'same-origin'
+        assert response.headers['Cross-Origin-Resource-Policy'] == 'same-origin'
+
+    def test_csp_hardening_directives(self, client):
+        directives = {
+            part.strip() for part in client.get('/').headers['Content-Security-Policy'].split(';')
+        }
+        assert "object-src 'none'" in directives
+        assert "base-uri 'self'" in directives
+        assert "frame-ancestors 'none'" in directives
+        assert "form-action 'self'" in directives
+        assert 'upgrade-insecure-requests' in directives
+
+    def test_csp_still_allows_google_fonts_and_data_images(self, client):
+        csp = client.get('/').headers['Content-Security-Policy']
+        assert 'https://fonts.googleapis.com' in csp
+        assert 'https://fonts.gstatic.com' in csp
+        assert 'data:' in csp
+
+    def test_csp_has_no_malformed_directive(self, client):
+        """A missing separator would fuse two directives into one token."""
+        csp = client.get('/').headers['Content-Security-Policy']
+        parts = [part.strip() for part in csp.split(';') if part.strip()]
+        assert len(parts) == len(set(parts))
+        for part in parts:
+            assert not part.startswith("'")
+            # Each directive starts with a bare directive name.
+            assert re.match(r'^[a-z-]+( |$)', part), part
+
+    def test_no_hsts_on_plain_http(self, client):
+        response = client.get('/')
+        assert 'Strict-Transport-Security' not in response.headers
+
+    def test_hsts_on_secure_request(self, client):
+        response = client.get('/', base_url='https://localhost')
+        assert response.headers['Strict-Transport-Security'] == (
+            'max-age=31536000; includeSubDomains'
+        )
 
 
 class TestFormulaInjection:
