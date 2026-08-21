@@ -144,11 +144,20 @@ def process_json():
 
             except requests.exceptions.Timeout:
                 return jsonify({'error': 'API request timed out'}), 400
-            except requests.exceptions.RequestException as e:
-                logger.warning('API request failed: %s', e)
+            except requests.exceptions.RequestException:
+                # Fixed message, no interpolation: requests' exception text carries
+                # the full URL, and the query string, fragment, userinfo AND path
+                # can each hold a token (F3/F9). Redacting one component is not
+                # enough, so nothing user-controlled is logged at all.
+                logger.warning('API request failed')
                 return jsonify({'error': 'API request failed'}), 400
             except json.JSONDecodeError:
                 return jsonify({'error': 'API response is not valid JSON'}), 400
+            except ValueError:
+                # parse_jsonl raises ValueError on a malformed line. Without this
+                # it reached the outer handler as a 500 with a logged traceback,
+                # although it is the caller's data that is wrong (F9).
+                return jsonify({'error': 'API response is not valid JSONL'}), 400
         else:
             return jsonify({'error': 'Invalid input method'}), 400
 

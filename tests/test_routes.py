@@ -3,6 +3,7 @@
 import csv
 import io
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 
@@ -513,3 +514,110 @@ class TestFormulaInjection:
         ws = load_workbook(io.BytesIO(response.data)).active
         assert ws.cell(row=2, column=1).value == -1
         assert ws.cell(row=2, column=2).value == 2.5
+
+
+class TestApiFetchLogHygiene:
+    """F3/F9 - no URL component or token may reach the logs."""
+
+    SECRET = 'sup3rs3cr3t-token'
+
+    def _post(self, client, url, **extra):
+        data = {'input_method': 'api', 'api_url': url}
+        data.update(extra)
+        return client.post('/process', data=data)
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_token_in_query_string_never_logged(self, mock_validate, mock_get, client, caplog):
+        import requests as req
+
+        mock_validate.return_value = (True, None)
+        url = f'https://api.example.com/data?api_key={self.SECRET}'
+        # requests puts the whole URL in the exception message.
+        mock_get.side_effect = req.exceptions.ConnectionError(
+            f"HTTPSConnectionPool(host='api.example.com', port=443): "
+            f'Max retries exceeded with url: /data?api_key={self.SECRET}'
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            response = self._post(client, url)
+
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API request failed'
+
+        logged = '\n'.join(record.getMessage() for record in caplog.records)
+        assert self.SECRET not in logged
+        assert 'api.example.com' not in logged
+        assert '/data' not in logged
+        assert 'API request failed' in logged
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_token_in_path_never_logged(self, mock_validate, mock_get, client, caplog):
+        import requests as req
+
+        mock_validate.return_value = (True, None)
+        url = f'https://api.example.com/v1/{self.SECRET}/data'
+        mock_get.side_effect = req.exceptions.ConnectionError(
+            f'Failed to establish a new connection to /v1/{self.SECRET}/data'
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            response = self._post(client, url)
+
+        assert response.status_code == 400
+        logged = '\n'.join(record.getMessage() for record in caplog.records)
+        assert self.SECRET not in logged
+        assert 'v1' not in logged
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_query_param_auth_value_never_logged(self, mock_validate, mock_get, client, caplog):
+        import requests as req
+
+        mock_validate.return_value = (True, None)
+        mock_get.side_effect = req.exceptions.ConnectionError('boom')
+
+        with caplog.at_level(logging.DEBUG):
+            response = self._post(
+                client,
+                'https://api.example.com/data',
+                auth_method='query_param',
+                query_param_name='api_key',
+                query_param_value=self.SECRET,
+            )
+
+        assert response.status_code == 400
+        assert self.SECRET not in '\n'.join(r.getMessage() for r in caplog.records)
+
+
+class TestApiFetchJsonlErrors:
+    """F9 - a malformed JSONL body from the API is a 400, not a logged 500."""
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_malformed_jsonl_returns_400(self, mock_validate, mock_get, client, caplog):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'{"a": 1}\n{bad json}\n']
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        with caplog.at_level(logging.DEBUG):
+            response = client.post(
+                '/process',
+                data={
+                    'input_method': 'api',
+                    'api_url': 'https://api.example.com/data',
+                    'data_format': 'jsonl',
+                },
+            )
+
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response is not valid JSONL'
+
+        logged = '\n'.join(record.getMessage() for record in caplog.records)
+        assert 'Unexpected error' not in logged
+        assert 'bad json' not in logged
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
