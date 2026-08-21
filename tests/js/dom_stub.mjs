@@ -2,13 +2,25 @@
 // assertions on its pure export helpers. No build step, no dependencies: the
 // script under test is the exact file the browser gets.
 
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;' };
+
 function makeElement() {
+    // textContent/innerHTML are real accessors so app.js's escapeHtml() -- which
+    // escapes by round-tripping through a detached div -- behaves as in a browser.
+    let text = '';
+    let html = '';
+
     const el = {
         dataset: {},
         files: [],
         style: {},
-        textContent: '',
-        innerHTML: '',
+        get textContent() { return text; },
+        set textContent(value) {
+            text = String(value);
+            html = text.replace(/[&<>]/g, (ch) => HTML_ESCAPES[ch]);
+        },
+        get innerHTML() { return html; },
+        set innerHTML(value) { html = String(value); },
         value: '',
         disabled: false,
         classList: {

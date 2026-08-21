@@ -7,13 +7,14 @@ import io
 import json
 import logging
 import re
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Response, request
 
 import config as config_module
-from app import create_app
+from app import check_rate_limit_topology, create_app, worker_count_from_start_command
 from extensions import client_ip_key
 
 
@@ -800,7 +801,13 @@ class TestProductionSecretKey:
             create_app(cfg)
 
     def test_production_with_real_key_starts(self, fresh_config):
-        cfg = fresh_config(APP_ENV='production', SECRET_KEY='a-real-random-value')
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='a-real-random-value',
+            # A production app must also declare its topology (2.10).
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+        )
         app = create_app(cfg)
         assert app.config['SECRET_KEY'] == 'a-real-random-value'
 
@@ -1138,7 +1145,12 @@ class TestCookieHardening:
         assert 'Secure' not in cookie
 
     def test_production_sets_secure(self, fresh_config):
-        cfg = fresh_config(APP_ENV='production', SECRET_KEY='a-real-random-value')
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='a-real-random-value',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+        )
         assert cfg.SESSION_COOKIE_SECURE is True
 
         cookie = self._set_cookie(create_app(cfg))
@@ -1279,3 +1291,367 @@ class TestStaticAssetCaching:
         app = create_app(cfg)
         response = app.test_client().get('/static/js/app.js')
         assert 'max-age=60' in response.headers['Cache-Control']
+
+
+class TestStreamingCsvExport:
+    """P3 - CSV is generator-streamed and stays uncapped."""
+
+    def test_response_is_streamed(self, app):
+        client = app.test_client()
+        with app.test_request_context():
+            pass
+        response = client.post(
+            '/export-csv',
+            data=json.dumps(
+                {
+                    'csv_data': [{'a': i, 'b': 'x' * 20} for i in range(2000)],
+                    'csv_columns': ['a', 'b'],
+                }
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+        # No Content-Length: the body is produced as it is written.
+        assert 'Content-Length' not in response.headers
+        rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+        assert rows[0] == ['a', 'b']
+        assert len(rows) == 2001
+
+    def test_csv_is_not_capped_by_the_xlsx_budget(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 10
+        response = app.test_client().post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': i} for i in range(200)], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+        assert len(response.get_data(as_text=True).strip().splitlines()) == 201
+
+    def test_chunk_boundary_does_not_lose_or_duplicate_rows(self, app):
+        # Exercise exactly the flush boundary of CSV_STREAM_CHUNK_ROWS.
+        from routes import CSV_STREAM_CHUNK_ROWS
+
+        for count in (
+            CSV_STREAM_CHUNK_ROWS - 1,
+            CSV_STREAM_CHUNK_ROWS,
+            CSV_STREAM_CHUNK_ROWS + 1,
+        ):
+            response = app.test_client().post(
+                '/export-csv',
+                data=json.dumps(
+                    {'csv_data': [{'a': i} for i in range(count)], 'csv_columns': ['a']}
+                ),
+                content_type='application/json',
+            )
+            rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+            assert [r[0] for r in rows[1:]] == [str(i) for i in range(count)], count
+
+
+class TestXlsxExportBudget:
+    """P3 / D6 - the XLSX guard is on by default, budgeted in cells, never silent."""
+
+    def test_process_advertises_the_budget(self, client, app):
+        app.config['MAX_EXPORT_CELLS'] = 1000
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': json.dumps([{'a': i, 'b': i} for i in range(5)]),
+                'json_path': '(root)',
+            },
+        )
+        data = json.loads(response.data)
+        assert data['total_rows'] == 5
+        assert data['total_cells'] == 10
+        assert data['max_export_cells'] == 1000
+
+    def test_existing_keys_are_unchanged(self, client):
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': '[{"a": 1}]',
+                'json_path': '(root)',
+            },
+        )
+        data = json.loads(response.data)
+        for key in ('success', 'columns', 'preview', 'total_rows', 'csv_data', 'csv_columns'):
+            assert key in data
+        assert data['total_rows'] == 1
+        assert data['columns'] == ['a']
+
+    def test_oversized_export_is_refused_not_truncated(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 10
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps(
+                {'csv_data': [{'a': i, 'b': i} for i in range(20)], 'csv_columns': ['a', 'b']}
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 400
+        error = json.loads(response.data)['error']
+        assert '40 cells' in error
+        assert 'limit of 10' in error
+        assert 'CSV or TSV' in error
+
+    def test_export_at_the_limit_succeeds(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 40
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps(
+                {'csv_data': [{'a': i, 'b': i} for i in range(20)], 'csv_columns': ['a', 'b']}
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+    def test_zero_disables_the_guard(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 0
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': i} for i in range(50)], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+    def test_guard_is_enabled_by_default(self, app):
+        assert app.config['MAX_EXPORT_CELLS'] > 0
+
+    def test_export_writes_no_files(self, app, tmp_path, monkeypatch):
+        """
+        D6 / AGENTS.md: no disk writes of payloads.
+
+        openpyxl's write_only mode and a rolled-over SpooledTemporaryFile both
+        put payload bytes in the OS temp directory. Point every temp mechanism at
+        an empty directory and assert nothing lands there.
+        """
+        for var in ('TMPDIR', 'TEMP', 'TMP'):
+            monkeypatch.setenv(var, str(tmp_path))
+        monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps(
+                {
+                    'csv_data': [{'a': f'value-{i}', 'b': i} for i in range(3000)],
+                    'csv_columns': ['a', 'b'],
+                }
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+        assert len(response.get_data()) > 0
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestPreviewTruncationDoesNotAffectExports:
+    """P2.2 / P5 - the preview is capped; csv_data and exports are not."""
+
+    LONG = 'L' * 2000
+
+    def _process(self, client):
+        payload = json.dumps(
+            [{'text': self.LONG, 'items': list(range(100)), 'meta': {'a': self.LONG}}]
+        )
+        return json.loads(
+            client.post(
+                '/process',
+                data={
+                    'input_method': 'paste',
+                    'pasted_json': payload,
+                    'json_path': '(root)',
+                },
+            ).data
+        )
+
+    def test_preview_is_truncated(self, client):
+        preview = self._process(client)['preview'][0]
+        assert preview['text'].endswith('… (truncated)')
+        assert len(preview['text']) < len(self.LONG)
+        assert len(preview['items']) == 21
+
+    def test_csv_data_keeps_full_fidelity(self, client):
+        csv_data = self._process(client)['csv_data'][0]
+        assert csv_data['text'] == self.LONG
+        assert csv_data['meta.a'] == self.LONG
+        assert json.loads(csv_data['items']) == list(range(100))
+
+    def test_server_csv_export_is_untruncated(self, client):
+        data = self._process(client)
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': data['csv_data'], 'csv_columns': data['csv_columns']}),
+            content_type='application/json',
+        )
+        rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+        assert self.LONG in rows[1]
+        assert '… (truncated)' not in response.get_data(as_text=True)
+
+    def test_xlsx_export_is_untruncated(self, client):
+        from openpyxl import load_workbook
+
+        data = self._process(client)
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': data['csv_data'], 'csv_columns': data['csv_columns']}),
+            content_type='application/json',
+        )
+        ws = load_workbook(io.BytesIO(response.data)).active
+        values = [cell.value for cell in ws[2]]
+        assert self.LONG in values
+
+
+class TestApiFetchDecodesWithoutAnExtraCopy:
+    """P12 - the streamed bytearray is decoded directly."""
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_bytearray_is_decoded_in_place(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # Several chunks, plus a multi-byte character split across none of them,
+        # to prove the accumulated bytearray is what gets decoded.
+        mock_resp.iter_content.return_value = [
+            b'[{"name": "Zo',
+            'ë'.encode(),
+            b'"}]',
+        ]
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'json_path': '(root)',
+            },
+        )
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['csv_data'][0]['name'] == 'Zoë'
+
+
+class TestRateLimitTopologyGuard:
+    """
+    2.10 / F12 - memory:// counters are process-local, so the guard must fail
+    closed rather than let a multi-worker deployment silently enforce N x the
+    configured limit.
+    """
+
+    def test_memory_storage_counters_are_not_shared(self):
+        """
+        The multiplier is real, not theoretical.
+
+        Two limiter storages on memory:// do not see each other's hits, which is
+        exactly what happens across gunicorn workers and across replicas.
+        """
+        from limits.storage import storage_from_string
+
+        first = storage_from_string('memory://')
+        second = storage_from_string('memory://')
+
+        for _ in range(5):
+            first.incr('shared-key', 60)
+
+        assert first.get('shared-key') == 5
+        assert second.get('shared-key') == 0
+
+    def test_storage_uri_is_configurable_at_all(self, fresh_config):
+        # config.py hardcoded 'memory://' before v1.2, so no deployment could set
+        # shared storage even if it wanted to (2.10a).
+        cfg = fresh_config(RATELIMIT_STORAGE_URI='redis://localhost:6379/0')
+        assert cfg.RATELIMIT_STORAGE_URI == 'redis://localhost:6379/0'
+
+    def test_default_topology_starts_clean(self, fresh_config, caplog):
+        cfg = fresh_config(APP_ENV=None, WEB_CONCURRENCY=None, APP_REPLICAS=None)
+        with caplog.at_level(logging.WARNING):
+            create_app(cfg)
+        assert 'Rate-limit topology' not in caplog.text
+
+    def test_multi_worker_on_memory_storage_warns_outside_production(self, fresh_config, caplog):
+        cfg = fresh_config(APP_ENV=None, WEB_CONCURRENCY='4', APP_REPLICAS='1')
+        with caplog.at_level(logging.WARNING):
+            create_app(cfg)
+        assert 'process-local' in caplog.text
+        assert '4 x 1' in caplog.text
+
+    def test_multi_worker_on_memory_storage_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='4',
+            APP_REPLICAS='1',
+        )
+        with pytest.raises(RuntimeError, match='process-local'):
+            create_app(cfg)
+
+    def test_multi_replica_on_memory_storage_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='3',
+        )
+        with pytest.raises(RuntimeError, match='1 x 3'):
+            create_app(cfg)
+
+    def test_missing_declaration_raises_in_production(self, fresh_config):
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY='k', WEB_CONCURRENCY=None)
+        with pytest.raises(RuntimeError, match='WEB_CONCURRENCY is not declared'):
+            create_app(cfg)
+
+    def test_missing_replica_declaration_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production', SECRET_KEY='k', WEB_CONCURRENCY='1', APP_REPLICAS=None
+        )
+        with pytest.raises(RuntimeError, match='APP_REPLICAS is not declared'):
+            create_app(cfg)
+
+    def test_shared_storage_allows_a_declared_multi_worker_topology(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='4',
+            APP_REPLICAS='2',
+            RATELIMIT_STORAGE_URI='redis://localhost:6379/0',
+        )
+        # Constructed, not connected: Flask-Limiter dials Redis lazily.
+        app = create_app(cfg)
+        assert app.config['RATELIMIT_STORAGE_URI'].startswith('redis://')
+
+    def test_start_command_contradicting_the_declaration_raises(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production', SECRET_KEY='k', WEB_CONCURRENCY='1', APP_REPLICAS='1'
+        )
+        app = create_app(cfg)
+        argv = ['/usr/bin/gunicorn', 'app:create_app()', '--workers', '4']
+        with pytest.raises(RuntimeError, match='start command runs --workers 4'):
+            check_rate_limit_topology(app, argv=argv)
+
+    def test_start_command_agreeing_with_the_declaration_is_fine(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='4',
+            APP_REPLICAS='1',
+            RATELIMIT_STORAGE_URI='redis://localhost:6379/0',
+        )
+        app = create_app(cfg)
+        check_rate_limit_topology(app, argv=['/usr/bin/gunicorn', '--workers=4'])
+
+    def test_non_gunicorn_argv_is_ignored(self, fresh_config):
+        cfg = fresh_config()
+        app = create_app(cfg)
+        # pytest's own -w-like flags must not be read as a worker declaration.
+        check_rate_limit_topology(app, argv=['pytest', '-w', '9'])
+
+    def test_worker_count_parsing(self):
+        assert worker_count_from_start_command(['gunicorn', '--workers', '3']) == 3
+        assert worker_count_from_start_command(['gunicorn', '-w', '2']) == 2
+        assert worker_count_from_start_command(['/x/gunicorn', '--workers=7']) == 7
+        assert worker_count_from_start_command(['gunicorn', '--bind', ':80']) is None
+        assert worker_count_from_start_command(['gunicorn', '--workers', 'x']) is None
+        assert worker_count_from_start_command([]) is None

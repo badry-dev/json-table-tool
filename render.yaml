@@ -6,14 +6,36 @@ services:
     name: json-table-converter
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn "app:create_app()" --bind 0.0.0.0:$PORT
+    # --workers comes from WEB_CONCURRENCY so the number gunicorn runs is the
+    # same number the app validates (roadmap 2.10b). --timeout must stay above
+    # API_FETCH_TIMEOUT (default 30s) or a slow API fetch races the worker kill
+    # and the client sees a 502 instead of the timeout message (P9).
+    startCommand: >-
+      gunicorn "app:create_app()"
+      --bind 0.0.0.0:$PORT
+      --workers "$WEB_CONCURRENCY"
+      --timeout 60
     envVars:
       - key: PYTHON_VERSION
         value: 3.14.5
       - key: SECRET_KEY
         generateValue: true
+      # The one canonical production signal: enables the SECRET_KEY fail-fast
+      # (F7), the Secure session cookie (F16) and the topology guard (2.10).
+      - key: APP_ENV
+        value: production
+      # Rate-limit topology. memory:// counters are process-local, so the
+      # effective limit is multiplied by workers x replicas. Going above 1x1
+      # requires a shared RATELIMIT_STORAGE_URI (redis://...) plus
+      # requirements-redis.txt in the build command -- the guard refuses to start
+      # otherwise. APP_REPLICAS must mirror numInstances below.
+      - key: WEB_CONCURRENCY
+        value: 1
+      - key: APP_REPLICAS
+        value: 1
     # Free tier settings
     plan: free
+    numInstances: 1
     # No persistent disk = no data storage
     # Auto-deploy on push, but only once CI checks pass. Render blocks the
     # deploy when the commit has failing checks or no checks at all.

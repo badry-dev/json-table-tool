@@ -72,6 +72,27 @@ def sanitize_cell(value):
     return serialized
 
 
+def flatten_rows(rows, max_depth=10):
+    """
+    Flatten every row and collect the column names in a single pass.
+
+    Returns (flattened_rows, sorted_column_names). Previously the caller
+    flattened, then walked the result again with get_all_columns -- two full
+    passes over the largest structure in the request (P8).
+
+    The names are accumulated in a set and sorted once at the end, which is
+    exactly what get_all_columns produces; set iteration order is not relied on.
+    """
+    flattened = []
+    columns = set()
+    for row in rows:
+        flat = flatten_for_csv(row, max_depth=max_depth)
+        flattened.append(flat)
+        if isinstance(flat, dict):
+            columns.update(flat.keys())
+    return flattened, sorted(columns)
+
+
 def extract_table_data(json_data, _depth=0, max_depth=10):
     """
     Extract tabular data from JSON.
@@ -162,3 +183,70 @@ def get_all_columns(data):
         if isinstance(row, dict):
             columns.update(row.keys())
     return sorted(columns)
+
+
+# --- Preview projection (P2.2/P5) -------------------------------------------
+#
+# `preview` rows carry full-fidelity nested structures, so a 50k-key object or a
+# 5 MB string cell is handed straight to the browser and freezes the tab. These
+# caps apply to the PREVIEW ONLY: the projection is a copy, so table_data and
+# csv_data -- and therefore every export -- keep the original values.
+
+PREVIEW_MAX_STRING = 256
+PREVIEW_MAX_ITEMS = 20
+PREVIEW_TRUNCATION_SUFFIX = '… (truncated)'
+
+
+def _truncate_preview_value(value, max_string, max_items, depth, max_depth):
+    """Return a capped copy of one nested value."""
+    if isinstance(value, str):
+        if len(value) > max_string:
+            return value[:max_string] + PREVIEW_TRUNCATION_SUFFIX
+        return value
+
+    if isinstance(value, dict):
+        if depth >= max_depth:
+            return PREVIEW_TRUNCATION_SUFFIX
+        truncated = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= max_items:
+                truncated[PREVIEW_TRUNCATION_SUFFIX] = f'… and {len(value) - max_items} more keys'
+                break
+            truncated[key] = _truncate_preview_value(
+                item, max_string, max_items, depth + 1, max_depth
+            )
+        return truncated
+
+    if isinstance(value, list):
+        if depth >= max_depth:
+            return PREVIEW_TRUNCATION_SUFFIX
+        truncated = [
+            _truncate_preview_value(item, max_string, max_items, depth + 1, max_depth)
+            for item in value[:max_items]
+        ]
+        if len(value) > max_items:
+            truncated.append(f'… and {len(value) - max_items} more items')
+        return truncated
+
+    return value
+
+
+def preview_truncate(
+    row,
+    max_string=PREVIEW_MAX_STRING,
+    max_items=PREVIEW_MAX_ITEMS,
+    max_depth=10,
+):
+    """
+    Build a capped COPY of one preview row.
+
+    Every column of the row survives -- dropping columns would make the preview
+    table disagree with its own header. Only the values inside are capped.
+    Nothing is mutated: exports read the original rows.
+    """
+    if not isinstance(row, dict):
+        return _truncate_preview_value(row, max_string, max_items, 0, max_depth)
+    return {
+        key: _truncate_preview_value(value, max_string, max_items, 1, max_depth)
+        for key, value in row.items()
+    }

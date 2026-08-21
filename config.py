@@ -5,6 +5,10 @@ import os
 # Publicly known, and therefore only ever acceptable outside production.
 DEV_SECRET_KEY = 'dev-secret-key-change-in-production'
 
+# See MAX_EXPORT_CELLS below and docs/export-budget-v1.2.md for how this number
+# was measured.
+DEFAULT_MAX_EXPORT_CELLS = 250_000
+
 
 def is_production():
     """
@@ -87,8 +91,27 @@ class Config:
     # with it unset, behavior is identical to v1.1 and forged headers are ignored.
     TRUST_PROXY = os.environ.get('TRUST_PROXY', '0').strip().lower() in ('1', 'true', 'yes')
 
-    # Rate limiting (Flask-Limiter reads RATELIMIT_* keys automatically)
-    RATELIMIT_STORAGE_URI = 'memory://'
+    # Rate limiting (Flask-Limiter reads RATELIMIT_* keys automatically).
+    #
+    # memory:// counters are PROCESS-LOCAL, so the effective limit is multiplied
+    # by workers x replicas -- not by workers alone. This was hardcoded before
+    # v1.2, so no deployment could configure shared storage at all (2.10a/F12).
+    RATELIMIT_STORAGE_URI = os.environ.get('RATELIMIT_STORAGE_URI', 'memory://')
+
+    # WEB_CONCURRENCY is the SINGLE source of truth for the worker count: gunicorn
+    # reads it natively and every documented start command passes
+    # --workers "$WEB_CONCURRENCY", so the number this process validates cannot
+    # drift from the number gunicorn actually runs. Replica count is invisible from
+    # inside the process, so APP_REPLICAS is a deployment-layer declaration that
+    # must mirror render.yaml's numInstances.
+    #
+    # Defaults of 1 fail OPEN -- an undeclared 4-worker deployment reads as
+    # single-worker -- so under APP_ENV=production both must be declared
+    # explicitly; see check_rate_limit_topology in app.py.
+    WEB_CONCURRENCY = env_int('WEB_CONCURRENCY', 1)
+    APP_REPLICAS = env_int('APP_REPLICAS', 1)
+    WEB_CONCURRENCY_DECLARED = (os.environ.get('WEB_CONCURRENCY') or '').strip() != ''
+    APP_REPLICAS_DECLARED = (os.environ.get('APP_REPLICAS') or '').strip() != ''
     RATELIMIT_DEFAULT = os.environ.get('RATE_LIMIT_DEFAULT', '120/minute')
     RATE_LIMIT_PROCESS = os.environ.get('RATE_LIMIT_PROCESS', '30/minute')
     RATE_LIMIT_EXPORT = os.environ.get('RATE_LIMIT_EXPORT', '60/minute')
@@ -101,6 +124,18 @@ class Config:
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
     SESSION_COOKIE_SECURE = is_production()
+
+    # XLSX-only export budget (P3/D6), in CELLS (rows x columns) because that is
+    # what drives openpyxl's memory -- a 10 MiB body with 3 columns and one with
+    # 500 columns have wildly different footprints at the same row count.
+    #
+    # Enabled by default: an unlimited default would leave P3 (High) unmitigated.
+    # The value is derived from the Performance Review section 4 measurement (see
+    # docs/export-budget-v1.2.md), not chosen by feel -- re-derive it whenever that
+    # measurement is re-run. 0 disables the guard for operators who knowingly opt
+    # out. CSV/TSV stay uncapped and streamed, so every dataset /process accepts
+    # remains exportable by some route.
+    MAX_EXPORT_CELLS = env_int('MAX_EXPORT_CELLS', DEFAULT_MAX_EXPORT_CELLS)
 
     # Static assets are revalidated on every navigation without this, costing a
     # round trip per page load -- worst on a Render free-tier cold start (P6).

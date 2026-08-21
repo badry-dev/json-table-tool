@@ -25,6 +25,8 @@ const exportBtn = document.getElementById('exportBtn');
 // Store data for export and sorting
 let csvData = null;
 let csvColumns = null;
+let totalCells = 0;
+let maxExportCells = 0;
 let currentColumns = null;
 let currentRows = null;
 let currentTotalRows = 0;
@@ -138,6 +140,9 @@ async function submitForm(jsonPath) {
 
         csvData = data.csv_data;
         csvColumns = data.csv_columns;
+        totalCells = data.total_cells || 0;
+        maxExportCells = data.max_export_cells || 0;
+        updateExcelAvailability();
 
         renderTable(data.columns, data.preview, data.total_rows);
         showResults();
@@ -158,8 +163,21 @@ const treeCancelBtn = document.getElementById('treeCancel');
 
 let selectedTreePath = null;
 
+// P4: the picker used to build a DOM node for every key of every object up
+// front, so a 10 MB payload meant tens of thousands of nodes in one synchronous
+// pass -- a multi-second freeze before the modal appeared. Children are now
+// built on first toggle, and both the per-level fan-out and the total node count
+// are capped.
+const TREE_MAX_CHILDREN = 200;
+const TREE_MAX_NODES = 5000;
+
+// Values are held off-DOM: a node's children cannot be built from markup alone.
+const treeNodeValues = new WeakMap();
+let treeNodesBuilt = 0;
+
 function showTreePicker(rawJson) {
     selectedTreePath = null;
+    treeNodesBuilt = 0;
     treeSelectedLabel.textContent = 'No node selected';
     treeConfirmBtn.disabled = true;
     treeContainer.innerHTML = '';
@@ -184,6 +202,8 @@ function describeNode(value) {
 
 function buildTreeNode(value, path, keyLabel, openByDefault) {
     const info = describeNode(value);
+    treeNodesBuilt += 1;
+
     const node = document.createElement('div');
     node.classList.add('tree-node', `tree-${info.kind}`);
 
@@ -203,6 +223,7 @@ function buildTreeNode(value, path, keyLabel, openByDefault) {
 
     if (info.selectable) {
         row.classList.add('tree-selectable');
+        row.dataset.path = path;
         row.addEventListener('click', (e) => {
             // Don't select when clicking only the toggle chevron
             if (e.target === toggle && hasChildren) return;
@@ -220,35 +241,67 @@ function buildTreeNode(value, path, keyLabel, openByDefault) {
 
     if (hasChildren) {
         const children = document.createElement('div');
-        children.classList.add('tree-children');
-        if (!openByDefault) children.classList.add('hidden');
-
-        if (Array.isArray(value)) {
-            const max = Math.min(value.length, 50);
-            for (let i = 0; i < max; i++) {
-                const childPath = path === '(root)' ? String(i) : `${path}.${i}`;
-                children.appendChild(buildTreeNode(value[i], childPath, `[${i}]`, false));
-            }
-            if (value.length > max) {
-                const more = document.createElement('div');
-                more.classList.add('tree-more');
-                more.textContent = `… and ${value.length - max} more items`;
-                children.appendChild(more);
-            }
-        } else {
-            for (const k of Object.keys(value)) {
-                const childPath = path === '(root)' ? k : `${path}.${k}`;
-                children.appendChild(buildTreeNode(value[k], childPath, k, false));
-            }
-        }
+        children.classList.add('tree-children', 'hidden');
+        treeNodeValues.set(children, { value, path });
         node.appendChild(children);
+        if (openByDefault) {
+            populateChildren(children);
+            children.classList.remove('hidden');
+        }
     }
     return node;
+}
+
+function childEntries(value, path) {
+    if (Array.isArray(value)) {
+        return value.map((item, index) => ({
+            value: item,
+            path: path === '(root)' ? String(index) : `${path}.${index}`,
+            label: `[${index}]`,
+        }));
+    }
+    return Object.keys(value).map(key => ({
+        value: value[key],
+        path: path === '(root)' ? key : `${path}.${key}`,
+        label: key,
+    }));
+}
+
+function appendTreeNotice(container, text) {
+    const notice = document.createElement('div');
+    notice.classList.add('tree-more');
+    notice.textContent = text;
+    container.appendChild(notice);
+}
+
+function populateChildren(children) {
+    if (children.dataset.loaded === 'true') return;
+    children.dataset.loaded = 'true';
+
+    const held = treeNodeValues.get(children);
+    if (!held) return;
+
+    const entries = childEntries(held.value, held.path);
+    const shown = Math.min(entries.length, TREE_MAX_CHILDREN);
+
+    for (let i = 0; i < shown; i++) {
+        if (treeNodesBuilt >= TREE_MAX_NODES) {
+            appendTreeNotice(children, 'Tree size limit reached — narrow the selection above.');
+            return;
+        }
+        const entry = entries[i];
+        children.appendChild(buildTreeNode(entry.value, entry.path, entry.label, false));
+    }
+
+    if (entries.length > shown) {
+        appendTreeNotice(children, `… and ${entries.length - shown} more`);
+    }
 }
 
 function toggleNode(node, toggle) {
     const children = node.querySelector(':scope > .tree-children');
     if (!children) return;
+    populateChildren(children);
     const isHidden = children.classList.toggle('hidden');
     toggle.textContent = isHidden ? '▸' : '▾';
 }
@@ -360,6 +413,24 @@ function handleSort(col) {
     renderTableDOM(currentColumns, sorted, currentTotalRows);
 }
 
+// P5: a nested object with 50k keys, a 100k-item array stringified whole, or a
+// single 5 MB string cell each freeze the tab. The server caps the preview
+// projection too (2.4); these caps also protect rows loaded client-side (4.1).
+const RENDER_MAX_KEYS = 20;
+const RENDER_MAX_ARRAY_ITEMS = 20;
+const RENDER_MAX_STRING = 500;
+
+function truncateForRender(text, max) {
+    const str = String(text);
+    if (str.length <= max) return { text: str, truncated: false };
+    return { text: str.slice(0, max), truncated: true };
+}
+
+function renderTruncatable(value, max) {
+    const { text, truncated } = truncateForRender(value, max);
+    return escapeHtml(text) + (truncated ? '<span class="text-muted"> … (truncated)</span>' : '');
+}
+
 // Format cell value
 function formatValue(value) {
     if (value === null || value === undefined) {
@@ -369,10 +440,17 @@ function formatValue(value) {
     if (typeof value === 'object') {
         if (Array.isArray(value)) {
             if (value.length === 0) return '[]';
-            if (typeof value[0] === 'object') {
+            if (typeof value[0] === 'object' && value[0] !== null) {
                 return renderNestedTable(value);
             }
-            return escapeHtml(JSON.stringify(value));
+            // Stringify only the head of a primitive array: JSON.stringify over a
+            // 100k-item array produces one huge string in a single <td>.
+            const head = value.slice(0, RENDER_MAX_ARRAY_ITEMS);
+            const rendered = escapeHtml(JSON.stringify(head));
+            if (value.length > RENDER_MAX_ARRAY_ITEMS) {
+                return `${rendered}<span class="text-muted"> … and ${value.length - RENDER_MAX_ARRAY_ITEMS} more</span>`;
+            }
+            return rendered;
         }
         return renderNestedObject(value);
     }
@@ -383,7 +461,7 @@ function formatValue(value) {
             : '<span class="text-false">false</span>';
     }
 
-    return escapeHtml(String(value));
+    return renderTruncatable(value, RENDER_MAX_STRING);
 }
 
 // Render nested object as mini table
@@ -391,15 +469,19 @@ function renderNestedObject(obj) {
     const keys = Object.keys(obj);
     if (keys.length === 0) return '{}';
 
+    const shown = keys.slice(0, RENDER_MAX_KEYS);
     let html = '<table class="nested-table"><tbody>';
-    keys.forEach(key => {
+    shown.forEach(key => {
         const val = obj[key];
         let displayVal = val;
         if (typeof val === 'object' && val !== null) {
             displayVal = JSON.stringify(val);
         }
-        html += `<tr><td><strong>${escapeHtml(key)}</strong></td><td>${escapeHtml(String(displayVal))}</td></tr>`;
+        html += `<tr><td><strong>${escapeHtml(key)}</strong></td><td>${renderTruncatable(displayVal, RENDER_MAX_STRING)}</td></tr>`;
     });
+    if (keys.length > shown.length) {
+        html += `<tr><td colspan="2" class="text-center-muted">… and ${keys.length - shown.length} more keys</td></tr>`;
+    }
     html += '</tbody></table>';
     return html;
 }
@@ -408,29 +490,37 @@ function renderNestedObject(obj) {
 function renderNestedTable(arr) {
     if (arr.length === 0) return '[]';
 
-    const cols = [...new Set(arr.flatMap(item => typeof item === 'object' ? Object.keys(item) : []))];
-    if (cols.length === 0) return escapeHtml(JSON.stringify(arr));
+    const allCols = [...new Set(arr.flatMap(item => (typeof item === 'object' && item !== null) ? Object.keys(item) : []))];
+    if (allCols.length === 0) return escapeHtml(JSON.stringify(arr.slice(0, RENDER_MAX_ARRAY_ITEMS)));
+    const cols = allCols.slice(0, RENDER_MAX_KEYS);
 
     let html = '<table class="nested-table"><thead><tr>';
     cols.forEach(col => {
         html += `<th>${escapeHtml(col)}</th>`;
     });
+    if (allCols.length > cols.length) {
+        html += `<th>… +${allCols.length - cols.length}</th>`;
+    }
     html += '</tr></thead><tbody>';
 
     arr.slice(0, 5).forEach(item => {
         html += '<tr>';
         cols.forEach(col => {
-            let val = item[col];
+            let val = item ? item[col] : undefined;
             if (typeof val === 'object' && val !== null) {
                 val = JSON.stringify(val);
             }
-            html += `<td>${escapeHtml(String(val ?? ''))}</td>`;
+            html += `<td>${renderTruncatable(val ?? '', RENDER_MAX_STRING)}</td>`;
         });
+        if (allCols.length > cols.length) {
+            html += '<td></td>';
+        }
         html += '</tr>';
     });
 
     if (arr.length > 5) {
-        html += `<tr><td colspan="${cols.length}" class="text-center-muted">... and ${arr.length - 5} more rows</td></tr>`;
+        const span = cols.length + (allCols.length > cols.length ? 1 : 0);
+        html += `<tr><td colspan="${span}" class="text-center-muted">... and ${arr.length - 5} more rows</td></tr>`;
     }
 
     html += '</tbody></table>';
@@ -442,6 +532,28 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// P3/D6: tell the user Excel is out of range before they click, rather than
+// after a 400. CSV/TSV are streamed and uncapped, so there is always a way out.
+function excelExportBlocked() {
+    return maxExportCells > 0 && totalCells > maxExportCells;
+}
+
+function updateExcelAvailability() {
+    const item = document.querySelector('.export-dropdown-item[data-format="xlsx"]');
+    if (!item) return;
+    if (excelExportBlocked()) {
+        item.disabled = true;
+        item.classList.add('disabled');
+        item.textContent = 'Excel — too large, use CSV/TSV';
+        item.title = `${totalCells} cells exceeds the Excel export limit of ${maxExportCells}`;
+    } else {
+        item.disabled = false;
+        item.classList.remove('disabled');
+        item.textContent = 'Export Excel';
+        item.title = '';
+    }
 }
 
 // Export dropdown toggle
@@ -473,6 +585,13 @@ document.querySelectorAll('.export-dropdown-item').forEach(item => {
         } else if (format === 'tsv') {
             downloadDelimited(csvColumns, csvData, '\t', 'exported_data.tsv');
         } else if (format === 'xlsx') {
+            if (excelExportBlocked()) {
+                showError(
+                    `Dataset is ${totalCells} cells, above the Excel export limit of ` +
+                    `${maxExportCells}. Export CSV or TSV instead.`
+                );
+                return;
+            }
             await exportXlsx();
         }
     });
@@ -503,9 +622,15 @@ function sanitizeCell(value) {
     return serialized;
 }
 
-// Pure string builder, kept separate from the download so it can be asserted
+// P13: build the file as a list of chunks instead of one giant string. A 10 MB
+// dataset otherwise means a ~10-30 MB string plus a Blob copy of it, which
+// blocks the main thread and doubles peak memory for no reason -- Blob already
+// accepts several parts.
+const BLOB_CHUNK_ROWS = 2000;
+
+// Pure builders, kept separate from the download so they can be asserted
 // directly (tests/js/test_export_sanitize.mjs).
-function buildDelimited(columns, data, delimiter) {
+function buildDelimitedChunks(columns, data, delimiter) {
     const escape = (val) => {
         const str = String(val ?? '');
         if (str.includes(delimiter) || str.includes('"') || str.includes('\n')) {
@@ -514,24 +639,33 @@ function buildDelimited(columns, data, delimiter) {
         return str;
     };
 
-    let output = columns.map(col => escape(sanitizeCell(col))).join(delimiter) + '\n';
-    data.forEach(row => {
-        const line = columns
-            .map(col => escape(sanitizeCell(row[col])))
-            .join(delimiter);
-        output += line + '\n';
+    const chunks = [];
+    let pending = columns.map(col => escape(sanitizeCell(col))).join(delimiter) + '\n';
+
+    data.forEach((row, index) => {
+        pending += columns.map(col => escape(sanitizeCell(row[col]))).join(delimiter) + '\n';
+        if ((index + 1) % BLOB_CHUNK_ROWS === 0) {
+            chunks.push(pending);
+            pending = '';
+        }
     });
-    return output;
+
+    if (pending) chunks.push(pending);
+    return chunks;
+}
+
+function buildDelimited(columns, data, delimiter) {
+    return buildDelimitedChunks(columns, data, delimiter).join('');
 }
 
 // Client-side CSV/TSV generation
 function downloadDelimited(columns, data, delimiter, filename) {
-    const output = buildDelimited(columns, data, delimiter);
+    const chunks = buildDelimitedChunks(columns, data, delimiter);
 
     const mimeType = delimiter === '\t'
         ? 'text/tab-separated-values; charset=utf-8'
         : 'text/csv; charset=utf-8';
-    const blob = new Blob([output], { type: mimeType });
+    const blob = new Blob(chunks, { type: mimeType });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -557,7 +691,10 @@ async function exportXlsx() {
             })
         });
 
-        if (!response.ok) throw new Error('Excel export failed');
+        if (!response.ok) {
+            const detail = await response.json().catch(() => null);
+            throw new Error((detail && detail.error) || 'Excel export failed');
+        }
 
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);

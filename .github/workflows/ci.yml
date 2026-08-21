@@ -36,5 +36,8 @@ jobs:
       - name: Client-side export assertions (F1)
         run: node tests/js/test_export_sanitize.mjs
 
+      - name: Client-side render/cap assertions (P4/P5/P13)
+        run: node tests/js/test_render_caps.mjs
+
       - name: Audit runtime dependencies
         run: pip-audit -r requirements.txt

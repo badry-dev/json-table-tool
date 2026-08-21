@@ -954,3 +954,10 @@ th.sort-desc::after {
     white-space: nowrap;
 }
 
+
+/* Export entry that is out of range for the format (P3/D6). */
+.export-dropdown-item.disabled,
+.export-dropdown-item:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

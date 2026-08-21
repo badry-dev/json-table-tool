@@ -111,7 +111,8 @@ git push -u origin main
    - **Branch**: `main`
    - **Runtime**: `Python 3`
    - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `gunicorn "app:create_app()" --bind 0.0.0.0:$PORT`
+   - **Start Command**: `gunicorn "app:create_app()" --bind 0.0.0.0:$PORT --workers "$WEB_CONCURRENCY" --timeout 60`
+   - **Environment**: `APP_ENV=production`, `WEB_CONCURRENCY=1`, `APP_REPLICAS=1` (see [Deployment topology](#deployment-topology-and-rate-limiting))
 4. Select **Free** plan
 5. Click **"Create Web Service"**
 
@@ -184,9 +185,19 @@ pip install -r requirements.txt
 # Set production environment variables
 export SECRET_KEY="your-random-secret-key-here"
 export FLASK_DEBUG=0
+export APP_ENV=production
 
-# Run with gunicorn
-gunicorn "app:create_app()" --bind 0.0.0.0:8000 --workers 4
+# Deployment topology. memory:// rate-limit counters are process-local, so the
+# effective limit is multiplied by workers x replicas. One worker and one
+# instance is the default; see "Deployment topology and rate limiting" below
+# before raising either.
+export WEB_CONCURRENCY=1
+export APP_REPLICAS=1
+
+# Run with gunicorn. --workers comes from WEB_CONCURRENCY so the running count
+# and the declared count cannot drift, and --timeout stays above
+# API_FETCH_TIMEOUT (default 30s).
+gunicorn "app:create_app()" --bind 0.0.0.0:8000 --workers "$WEB_CONCURRENCY" --timeout 60
 ```
 
 #### Systemd Service (Auto-Start on Boot)
@@ -204,7 +215,10 @@ Group=www-data
 WorkingDirectory=/opt/json-table-tool
 Environment="SECRET_KEY=your-random-secret-key-here"
 Environment="FLASK_DEBUG=0"
-ExecStart=/opt/json-table-tool/venv/bin/gunicorn "app:create_app()" --bind 127.0.0.1:8000 --workers 4
+Environment="APP_ENV=production"
+Environment="WEB_CONCURRENCY=1"
+Environment="APP_REPLICAS=1"
+ExecStart=/opt/json-table-tool/venv/bin/gunicorn "app:create_app()" --bind 127.0.0.1:8000 --workers ${WEB_CONCURRENCY} --timeout 60
 Restart=always
 
 [Install]
@@ -253,7 +267,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE 8000
-CMD ["gunicorn", "app:create_app()", "--bind", "0.0.0.0:8000", "--workers", "4"]
+ENV APP_ENV=production
+ENV WEB_CONCURRENCY=1
+ENV APP_REPLICAS=1
+# --workers is derived from WEB_CONCURRENCY (shell form so it expands), and
+# --timeout stays above API_FETCH_TIMEOUT.
+CMD gunicorn "app:create_app()" --bind 0.0.0.0:8000 --workers "$WEB_CONCURRENCY" --timeout 60
 ```
 
 ```bash
@@ -262,6 +281,33 @@ docker run -p 8000:8000 \
   -e SECRET_KEY="your-random-secret-key-here" \
   json-table-tool
 ```
+
+### Deployment topology and rate limiting
+
+Flask-Limiter's default `memory://` storage keeps its counters **inside one
+process**. The effective limit is therefore multiplied by `workers x replicas`,
+not by workers alone: four workers on two instances enforce eight times the
+configured limit.
+
+The supported default is **one worker and one instance**. To run more:
+
+1. Install the Redis client: `pip install -r requirements.txt -r requirements-redis.txt`
+2. Set `RATELIMIT_STORAGE_URI=redis://...`
+3. Raise `WEB_CONCURRENCY` (and `APP_REPLICAS`, mirroring `numInstances`)
+
+Under `APP_ENV=production` the app refuses to start if `WEB_CONCURRENCY` or
+`APP_REPLICAS` is undeclared, if a `--workers N` in the start command disagrees
+with `WEB_CONCURRENCY`, or if either count exceeds one while storage is still
+`memory://`. Outside production the same conditions log a warning instead.
+
+**HTTPS is required on every deployment path.** API keys, bearer tokens and
+basic-auth passwords are POSTed from the browser to this app; without TLS they
+are exposed on the wire.
+
+**Timeout invariant:** gunicorn's `--timeout` must stay above
+`API_FETCH_TIMEOUT` (a factor of two is the documented margin). gunicorn's
+default of 30s equals the default `API_FETCH_TIMEOUT`, so a slow API fetch
+raced the worker kill and surfaced as a 502.
 
 #### Docker Compose
 

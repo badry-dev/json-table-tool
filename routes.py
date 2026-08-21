@@ -7,18 +7,28 @@ import logging
 import re
 
 import requests
-from flask import Blueprint, Response, current_app, jsonify, render_template, request
+from flask import (
+    Blueprint,
+    Response,
+    current_app,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+)
 from requests.auth import HTTPBasicAuth
 from werkzeug.exceptions import HTTPException
 
+from config import DEFAULT_MAX_EXPORT_CELLS
 from extensions import limiter
 from helpers import (
     extract_by_path,
     extract_table_data,
-    flatten_for_csv,
+    flatten_rows,
     get_all_columns,
     is_formula_trigger,
     parse_jsonl,
+    preview_truncate,
     sanitize_cell,
     serialize_cell_value,
 )
@@ -53,6 +63,9 @@ HEADER_NAME_PATTERN = re.compile(r'^[A-Za-z0-9-]+$')
 # extensions they do not recognize -- .jsonl in particular -- so a strict list
 # would reject legitimate uploads.
 ALLOWED_UPLOAD_EXTENSIONS = ('.json', '.jsonl')
+
+# Rows buffered before a chunk of CSV is handed to the WSGI server.
+CSV_STREAM_CHUNK_ROWS = 500
 
 ALLOWED_UPLOAD_CONTENT_TYPES = frozenset(
     {
@@ -215,7 +228,11 @@ def process_json():
                             }
                         ), 400
 
-                text = bytes(content).decode('utf-8')
+                # bytearray decodes directly; bytes(content) made a second full
+                # copy of the response body at peak (P12). Parsing, flattening and
+                # jsonify still materialize the dataset -- this removes one copy,
+                # it does not make the pipeline low-memory.
+                text = content.decode('utf-8')
                 json_data = parse_jsonl(text) if data_format == 'jsonl' else json.loads(text)
 
             except requests.exceptions.Timeout:
@@ -263,18 +280,29 @@ def process_json():
 
         columns = get_all_columns(table_data)
         preview_limit = current_app.config['PREVIEW_ROW_LIMIT']
-        preview_data = table_data[:preview_limit]
+        # A separate projection, not a mutation: csv_data below is built from the
+        # untouched rows, so exports stay full-fidelity (P2.2/P5).
+        preview_data = [preview_truncate(row) for row in table_data[:preview_limit]]
 
         max_depth = current_app.config['FLATTEN_MAX_DEPTH']
-        csv_data = [flatten_for_csv(row, max_depth=max_depth) for row in table_data]
-        csv_columns = get_all_columns(csv_data)
+        # One pass instead of flatten-then-rescan: names are collected into a set
+        # while flattening and sorted once at the end, which is byte-identical to
+        # get_all_columns' sorted output (P8).
+        csv_data, csv_columns = flatten_rows(table_data, max_depth=max_depth)
 
+        # Additive only: no existing key changes name, type or meaning.
+        # total_cells/max_export_cells let the client grey out the Excel entry
+        # BEFORE the user clicks, rather than after a 400 (D6).
         return jsonify(
             {
                 'success': True,
                 'columns': columns,
                 'preview': preview_data,
                 'total_rows': len(table_data),
+                'total_cells': len(csv_data) * len(csv_columns),
+                'max_export_cells': current_app.config.get(
+                    'MAX_EXPORT_CELLS', DEFAULT_MAX_EXPORT_CELLS
+                ),
                 'csv_data': csv_data,
                 'csv_columns': csv_columns,
             }
@@ -295,6 +323,36 @@ def process_json():
     except Exception:
         logger.exception('Unexpected error in process_json')
         return jsonify({'error': 'An internal error occurred'}), 500
+
+
+def _stream_csv(columns, rows):
+    """
+    Yield the CSV a chunk of rows at a time.
+
+    csv.writer needs a text buffer, so one StringIO is reused and truncated every
+    CSV_STREAM_CHUNK_ROWS rows instead of the whole file being built in memory
+    before the first byte goes out (P3).
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+
+    def drain():
+        value = buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        return value
+
+    writer.writerow([sanitize_cell(column) for column in columns])
+    yield drain()
+
+    for index, row in enumerate(rows, start=1):
+        writer.writerow([sanitize_cell(row.get(column, '')) for column in columns])
+        if index % CSV_STREAM_CHUNK_ROWS == 0:
+            yield drain()
+
+    remainder = drain()
+    if remainder:
+        yield remainder
 
 
 def _append_xlsx_row(ws, values):
@@ -329,16 +387,13 @@ def export_csv():
         if not csv_data:
             return jsonify({'error': 'No data to export'}), 400
 
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow([sanitize_cell(col) for col in csv_columns])
-
-        for row in csv_data:
-            writer.writerow([sanitize_cell(row.get(col, '')) for col in csv_columns])
-
-        output.seek(0)
+        # Streamed, and deliberately uncapped: CSV is natively streamable with no
+        # temp files, so every dataset /process accepts stays exportable by this
+        # route even when it is too large for a workbook (P3/D6). That, not an
+        # unbounded XLSX path, is what keeps the export contract as wide as the
+        # input contract.
         return Response(
-            output.getvalue(),
+            _stream_csv(csv_columns, csv_data),
             mimetype='text/csv',
             headers={
                 'Content-Disposition': 'attachment; filename=exported_data.csv',
@@ -370,6 +425,22 @@ def export_xlsx():
         if not xlsx_data:
             return jsonify({'error': 'No data to export'}), 400
 
+        limit = current_app.config.get('MAX_EXPORT_CELLS', DEFAULT_MAX_EXPORT_CELLS)
+        cells = len(xlsx_data) * len(xlsx_columns)
+        if limit and cells > limit:
+            # Defence in depth for direct API callers; the UI already greyed the
+            # Excel entry out using total_cells/max_export_cells from /process.
+            # A refusal, never a silent truncation -- a partial spreadsheet is
+            # worse than none.
+            return jsonify(
+                {
+                    'error': (
+                        f'Dataset is {cells} cells, above the Excel export limit '
+                        f'of {limit}; export CSV or TSV instead.'
+                    )
+                }
+            ), 400
+
         wb = Workbook()
         ws = wb.active
         ws.title = 'Data'
@@ -378,16 +449,24 @@ def export_xlsx():
         for row in xlsx_data:
             _append_xlsx_row(ws, [row.get(col, '') for col in xlsx_columns])
 
+        # Normal-mode Workbook and a plain BytesIO: no OS temp files anywhere.
+        # openpyxl's write_only mode writes worksheet parts to disk, and
+        # SpooledTemporaryFile is either pointless (its default max_size=0 never
+        # rolls over, so it is a BytesIO with extra indirection) or disk-backed
+        # (a non-zero threshold, or any fileno() call, puts payload bytes on
+        # disk). The cell budget above is what bounds memory (D6).
         output = io.BytesIO()
         wb.save(output)
+        del wb
         output.seek(0)
 
-        return Response(
-            output.getvalue(),
+        # send_file streams the buffer out in chunks; getvalue() would make a
+        # second full copy of the workbook at peak.
+        return send_file(
+            output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            headers={
-                'Content-Disposition': 'attachment; filename=exported_data.xlsx',
-            },
+            as_attachment=True,
+            download_name='exported_data.xlsx',
         )
 
     except HTTPException:
