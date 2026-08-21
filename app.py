@@ -6,6 +6,7 @@ import os
 import sys
 
 from flask import Flask, current_app, jsonify, request
+from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import DEV_SECRET_KEY, Config, is_production
@@ -198,6 +199,13 @@ def _register_error_handlers(app):
     threw a SyntaxError on the body and surfaced a parse error instead of the
     real problem. Every other error path in this app returns {"error": ...}.
     """
+
+    @app.errorhandler(CSRFError)
+    def _csrf_error(_error):
+        # Flask-WTF's own 400 is an HTML page, and app.js calls response.json()
+        # on every /process reply -- so a missing token surfaced as a JSON parse
+        # error rather than "CSRF token missing" (F10).
+        return jsonify({'error': 'CSRF token missing or invalid'}), 400
 
     @app.errorhandler(413)
     def _request_entity_too_large(_error):

@@ -1824,3 +1824,34 @@ class TestExportDropdownMarkup:
         html = client.get('/').data.decode('utf-8')
         for element_id in ('rowFilter', 'loadMoreBtn', 'loadAllBtn', 'columnsBtn'):
             assert f'id="{element_id}"' in html, element_id
+
+
+class TestCsrfErrorIsJson:
+    """F10 - a rejected POST must not hand app.js an HTML body to json()-parse."""
+
+    def _app_with_csrf(self, fresh_config):
+        app = create_app(fresh_config())
+        app.config['TESTING'] = True
+        # Deliberately NOT disabling CSRF: this is the behavior under test.
+        return app
+
+    def test_missing_token_returns_json_400(self, fresh_config):
+        app = self._app_with_csrf(fresh_config)
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': '[{"a": 1}]'},
+        )
+        assert response.status_code == 400
+        assert response.content_type.startswith('application/json')
+        assert json.loads(response.data)['error'] == 'CSRF token missing or invalid'
+
+    def test_export_routes_too(self, fresh_config):
+        app = self._app_with_csrf(fresh_config)
+        for url in ('/export-csv', '/export-xlsx'):
+            response = app.test_client().post(
+                url,
+                data=json.dumps({'csv_data': [{'a': 1}], 'csv_columns': ['a']}),
+                content_type='application/json',
+            )
+            assert response.status_code == 400, url
+            assert response.content_type.startswith('application/json'), url
