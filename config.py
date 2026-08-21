@@ -83,6 +83,10 @@ class Config:
     # value disables the check.
     API_ALLOWED_PORTS = env_int_set('API_ALLOWED_PORTS', '80,443,8443')
 
+    # Trust X-Forwarded-* from exactly one proxy hop (F12/D3). Off by default:
+    # with it unset, behavior is identical to v1.1 and forged headers are ignored.
+    TRUST_PROXY = os.environ.get('TRUST_PROXY', '0').strip().lower() in ('1', 'true', 'yes')
+
     # Rate limiting (Flask-Limiter reads RATELIMIT_* keys automatically)
     RATELIMIT_STORAGE_URI = 'memory://'
     RATELIMIT_DEFAULT = os.environ.get('RATE_LIMIT_DEFAULT', '120/minute')

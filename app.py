@@ -1,6 +1,7 @@
 """JSON Table Converter - Flask application factory."""
 
 from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import DEV_SECRET_KEY, Config, is_production
 from extensions import csrf, limiter
@@ -32,6 +33,14 @@ def create_app(config_class=Config):
     app.config.from_object(config_class)
 
     _assert_production_secret_key(app)
+
+    if app.config.get('TRUST_PROXY'):
+        # Exactly one trusted hop. Behind Render's load balancer or an Nginx
+        # reverse proxy every request otherwise appears to come from the proxy
+        # IP, so all users share one rate-limit bucket and one client can exhaust
+        # the site's quota (F12). x_proto also makes request.is_secure correct,
+        # which the HSTS header (1.5) and the Secure cookie flag (1.14) rely on.
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     # Initialize extensions
     csrf.init_app(app)

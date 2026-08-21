@@ -9,9 +9,11 @@ import re
 from unittest.mock import MagicMock, patch
 
 import pytest
+from flask import request
 
 import config as config_module
 from app import create_app
+from extensions import client_ip_key
 
 
 class TestIndexRoute:
@@ -912,3 +914,86 @@ class TestRecursionDepth:
             data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'rows'},
         )
         assert json.loads(response.data)['total_rows'] == 2
+
+
+class TestProxyAwareRateLimiting:
+    """F12 / D3 - X-Forwarded-For is honored only under TRUST_PROXY=1."""
+
+    @staticmethod
+    def _app_capturing_remote_addr(cfg):
+        app = create_app(cfg)
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+        seen = {}
+
+        @app.before_request
+        def _capture():
+            seen['remote_addr'] = request.remote_addr
+            seen['key'] = client_ip_key()
+            seen['is_secure'] = request.is_secure
+
+        return app, seen
+
+    def test_forwarded_for_ignored_by_default(self, fresh_config):
+        cfg = fresh_config(TRUST_PROXY=None)
+        app, seen = self._app_capturing_remote_addr(cfg)
+
+        app.test_client().get(
+            '/health',
+            headers={'X-Forwarded-For': '9.9.9.9', 'X-Forwarded-Proto': 'https'},
+            environ_base={'REMOTE_ADDR': '10.0.0.5'},
+        )
+
+        assert seen['remote_addr'] == '10.0.0.5'
+        assert seen['key'] == '10.0.0.5'
+        assert seen['is_secure'] is False
+
+    def test_forwarded_for_used_when_trusted(self, fresh_config):
+        cfg = fresh_config(TRUST_PROXY='1')
+        app, seen = self._app_capturing_remote_addr(cfg)
+
+        app.test_client().get(
+            '/health',
+            headers={'X-Forwarded-For': '9.9.9.9', 'X-Forwarded-Proto': 'https'},
+            environ_base={'REMOTE_ADDR': '10.0.0.5'},
+        )
+
+        assert seen['remote_addr'] == '9.9.9.9'
+        assert seen['key'] == '9.9.9.9'
+        # x_proto=1 also makes is_secure correct behind a TLS-terminating proxy,
+        # which HSTS (1.5) and the Secure cookie (1.14) depend on.
+        assert seen['is_secure'] is True
+
+    def test_only_one_hop_is_trusted(self, fresh_config):
+        """
+        A client that prepends its own hop must not choose its bucket.
+
+        With x_for=1 ProxyFix takes the LAST entry -- the hop our single trusted
+        proxy actually appended -- so the forged leading entry is ignored.
+        """
+        cfg = fresh_config(TRUST_PROXY='1')
+        app, seen = self._app_capturing_remote_addr(cfg)
+
+        app.test_client().get(
+            '/health',
+            headers={'X-Forwarded-For': '1.1.1.1, 2.2.2.2, 3.3.3.3'},
+            environ_base={'REMOTE_ADDR': '10.0.0.5'},
+        )
+
+        assert seen['remote_addr'] == '3.3.3.3'
+
+    def test_different_clients_get_different_buckets(self, fresh_config):
+        cfg = fresh_config(TRUST_PROXY='1')
+        app, seen = self._app_capturing_remote_addr(cfg)
+        client = app.test_client()
+
+        keys = []
+        for ip in ('9.9.9.9', '8.8.8.8'):
+            client.get(
+                '/health',
+                headers={'X-Forwarded-For': ip},
+                environ_base={'REMOTE_ADDR': '10.0.0.5'},
+            )
+            keys.append(seen['key'])
+
+        assert keys == ['9.9.9.9', '8.8.8.8']
