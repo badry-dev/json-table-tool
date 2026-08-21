@@ -87,13 +87,12 @@ python app.py
 - `extract_table_data(json_data)` — Extracts tabular rows from various JSON shapes (top-level array, dict containing an array of objects, nested dicts, or a single object).
 - `get_all_columns(data)` — Returns sorted unique column names across rows.
 - `parse_jsonl(text)` — Parses JSON Lines (one JSON value per non-empty line), raising `ValueError` with line numbers on errors.
-- `find_candidate_arrays(json_data)` — Discovers arrays of objects with their `path`, `length`, and first 5 `sample_keys` (used for the multi-array selector modal).
 - `extract_by_path(json_data, path)` — Navigates JSON by dot-notation path (`(root)` returns the document itself).
 
 **`routes.py`** — Flask Blueprint (`bp`):
 - `GET /` — Serves `index.html`.
 - `GET /health` — Returns `{"status": "ok", "version": APP_VERSION}` for monitoring.
-- `POST /process` — Parses JSON/JSONL from file/paste/API, returns preview + full CSV-ready data. Returns `{"needs_selection": true, "candidates": [...]}` if multiple arrays found and no `json_path` was provided. Rate-limited via `RATE_LIMIT_PROCESS`.
+- `POST /process` — Parses JSON/JSONL from file/paste/API, returns preview + full CSV-ready data. Returns `{"needs_selection": true, "raw_json": ...}` when no `json_path` was provided, so the client can render the JSON tree picker. Rate-limited via `RATE_LIMIT_PROCESS`.
 - `POST /export-csv` — Server-side CSV generation (fallback). Rate-limited via `RATE_LIMIT_EXPORT`.
 - `POST /export-xlsx` — Server-side Excel generation via openpyxl. Rate-limited via `RATE_LIMIT_EXPORT`.
 
@@ -110,7 +109,7 @@ API-fetch specifics: `requests.get` is called with `stream=True`, `allow_redirec
 - Client-side CSV/TSV export (no server round-trip needed)
 - Server-side Excel export via `/export-xlsx`
 - Theme detection (`prefers-color-scheme`) with localStorage override
-- Path selector modal when multiple candidate arrays are detected
+- JSON tree picker modal for choosing which node becomes the table
 
 **`templates/index.html`** — HTML structure only. References external CSS/JS via `url_for('static', ...)`. Includes CSRF meta tag, theme toggle button, format selector, export dropdown, and path selector modal. No inline scripts or styles (CSP enforced).
 
@@ -118,7 +117,7 @@ API-fetch specifics: `requests.get` is called with `stream=True`, `allow_redirec
 
 1. User provides JSON/JSONL (file / paste / API URL with optional auth).
 2. Server validates input (SSRF check for API URLs, UTF-8 decoding, JSON/JSONL parsing, size caps).
-3. If multiple candidate arrays found and no `json_path` is supplied, server returns the candidates so the UI can prompt the user to pick one.
+3. If no `json_path` is supplied, the server returns `raw_json` so the UI can render a tree picker and let the user choose a node.
 4. Server returns `preview` (first `PREVIEW_ROW_LIMIT` rows) plus full `csv_data` / `csv_columns`.
 5. Frontend renders the sortable preview table; nested objects render as mini tables.
 6. Export: CSV/TSV generated client-side instantly; Excel via the server endpoint.
@@ -161,7 +160,7 @@ python -m pytest tests/ -v
 ```
 
 Test files:
-- `tests/test_helpers.py` (31 tests) — `flatten_for_csv`, `extract_table_data`, `get_all_columns`, `parse_jsonl`, `find_candidate_arrays`, `extract_by_path`.
+- `tests/test_helpers.py` — `flatten_for_csv`, `extract_table_data`, `get_all_columns`, `parse_jsonl`, `extract_by_path`.
 - `tests/test_security.py` (16 tests) — URL validation with mocked DNS, private/loopback/link-local IP blocking, scheme checks.
 - `tests/test_routes.py` (35 tests) — All route integration tests, security headers, JSONL, path selection, API-fetch SSRF/size/timeout/error-leak coverage, CSV/Excel export edge cases.
 

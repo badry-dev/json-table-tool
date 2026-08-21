@@ -63,10 +63,10 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 **Why:** All state-changing routes accept browser form posts, so CSRF is mandatory. Disabling it in tests keeps fixtures simple — production behavior is exercised manually and via the security headers test.
 **How to apply:** When adding a route that mutates state or returns sensitive data, it inherits CSRF protection automatically. Don't add `@csrf.exempt` without justification. When testing CSRF behavior, do so in a dedicated test that flips `WTF_CSRF_ENABLED` back on.
 
-### 2026-05-12 — Multi-array JSON triggers a path-selector handshake  (area: backend / ux)
+### 2026-05-12 — Unselected JSON triggers the tree-picker handshake  (area: backend / ux)
 
-**What:** `/process` returns `{"needs_selection": true, "candidates": [...]}` (HTTP 200) when `find_candidate_arrays` reports more than one array of objects in the payload. The frontend opens a modal; the user picks; the request is re-submitted with `json_path` set to the chosen dotted path.
-**Why:** The original heuristic (`extract_table_data`) silently picked the first array it found, which surfaced the wrong data for nested API responses. Returning candidates is more honest than guessing.
+**What:** `/process` returns `{"needs_selection": true, "raw_json": <document>}` (HTTP 200) whenever no `json_path` was supplied. The frontend renders a JSON **tree picker** over `raw_json`; the user clicks any array or object node; the request is re-submitted with `json_path` set to the chosen dotted path.
+**Why:** The original heuristic (`extract_table_data`) silently picked the first array it found, which surfaced the wrong data for nested API responses. Handing the client the document and letting the user point at a node is more honest than guessing — and unlike the earlier `candidates` list it can reach any level, not just arrays of objects.
 **How to apply:** Don't "fix" the heuristic by being smarter — the selection prompt *is* the fix. The sentinel `'(root)'` is used when the top-level value is itself a list.
 
 ### 2026-05-12 — `flatten_for_csv` has a recursion-depth cap  (area: backend)

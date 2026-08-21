@@ -81,32 +81,6 @@ def parse_jsonl(text):
     return rows
 
 
-def find_candidate_arrays(json_data, prefix='', candidates=None):
-    """
-    Find all arrays of objects in JSON data, returning their paths and metadata.
-    Used when multiple arrays exist so the user can choose which to tabularize.
-    """
-    if candidates is None:
-        candidates = []
-
-    if isinstance(json_data, list):
-        if len(json_data) > 0 and isinstance(json_data[0], dict):
-            sample_keys = sorted(json_data[0].keys())[:5]
-            candidates.append(
-                {'path': prefix or '(root)', 'length': len(json_data), 'sample_keys': sample_keys}
-            )
-    elif isinstance(json_data, dict):
-        for key, value in json_data.items():
-            path = f'{prefix}.{key}' if prefix else key
-            if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
-                sample_keys = sorted(value[0].keys())[:5]
-                candidates.append({'path': path, 'length': len(value), 'sample_keys': sample_keys})
-            elif isinstance(value, dict):
-                find_candidate_arrays(value, path, candidates)
-
-    return candidates
-
-
 def extract_by_path(json_data, path):
     """
     Extract data from JSON using a dot-notation path.

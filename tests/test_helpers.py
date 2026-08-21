@@ -5,7 +5,6 @@ import json
 from helpers import (
     extract_by_path,
     extract_table_data,
-    find_candidate_arrays,
     flatten_for_csv,
     get_all_columns,
     parse_jsonl,
@@ -111,33 +110,6 @@ class TestParseJsonl:
         text = '{"name": "Alice", "age": 30}\n{"name": "Bob", "age": 25}'
         result = parse_jsonl(text)
         assert result[1]['name'] == 'Bob'
-
-
-class TestFindCandidateArrays:
-    def test_single_array_at_root(self):
-        data = [{'id': 1}, {'id': 2}]
-        candidates = find_candidate_arrays(data)
-        assert len(candidates) == 1
-        assert candidates[0]['path'] == '(root)'
-        assert candidates[0]['length'] == 2
-
-    def test_multiple_arrays(self):
-        data = {'users': [{'name': 'A'}], 'orders': [{'id': 1}, {'id': 2}]}
-        candidates = find_candidate_arrays(data)
-        assert len(candidates) == 2
-        paths = [c['path'] for c in candidates]
-        assert 'users' in paths
-        assert 'orders' in paths
-
-    def test_nested_array(self):
-        data = {'data': {'items': [{'x': 1}]}}
-        candidates = find_candidate_arrays(data)
-        assert len(candidates) == 1
-        assert candidates[0]['path'] == 'data.items'
-
-    def test_no_arrays(self):
-        data = {'a': 1, 'b': 'text'}
-        assert find_candidate_arrays(data) == []
 
 
 class TestExtractByPath:

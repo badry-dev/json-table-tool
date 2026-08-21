@@ -66,13 +66,12 @@ python -m pytest tests/ -v
   - `flatten_for_csv(data, parent_key='', sep='.', _depth=0, max_depth=10)` — depth-capped recursion; deep nesting is JSON-stringified instead of stack-overflowing.
   - `extract_table_data(json_data)` — heuristic: list-of-dicts → use directly; dict with array value → that array; nested dicts → recurse; otherwise single-row.
   - `parse_jsonl(text)` — line-by-line JSON; raises `ValueError` with the offending line number.
-  - `find_candidate_arrays(json_data, prefix='', candidates=None)` — discovers every array-of-objects with `{path, length, sample_keys}` metadata so the frontend can prompt the user.
   - `extract_by_path(json_data, path)` — dot-notation navigation; `'(root)'` is the sentinel for top-level lists.
   - `get_all_columns(data)` — sorted union of keys.
 - **`routes.py`** — Blueprint `bp`. Routes:
   - `GET /` → `templates/index.html`.
   - `GET /health` → `{"status": "ok", "version": APP_VERSION}`.
-  - `POST /process` → rate-limited (default `RATE_LIMIT_PROCESS=30/min`). Reads `input_method` (`file`/`paste`/`api`), `data_format` (`json`/`jsonl`), optional `json_path`. Returns `{success, columns, preview, total_rows, csv_data, csv_columns}` **or** `{needs_selection: true, candidates: [...]}` when multiple arrays found and no `json_path` selected.
+  - `POST /process` → rate-limited (default `RATE_LIMIT_PROCESS=30/min`). Reads `input_method` (`file`/`paste`/`api`), `data_format` (`json`/`jsonl`), optional `json_path`. Returns `{success, columns, preview, total_rows, csv_data, csv_columns}` **or** `{needs_selection: true, raw_json: ...}` when no `json_path` was selected, so the frontend can render the JSON tree picker.
   - `POST /export-csv` → rate-limited (default `RATE_LIMIT_EXPORT=60/min`). Server-side CSV fallback.
   - `POST /export-xlsx` → rate-limited. Server-side Excel via openpyxl.
 
