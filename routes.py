@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import re
 
 import requests
 from flask import Blueprint, Response, current_app, jsonify, render_template, request
@@ -25,6 +26,33 @@ from security import validate_url
 logger = logging.getLogger(__name__)
 
 bp = Blueprint('main', __name__)
+
+
+# F4: outbound header names come from the client, so this is a real allowlist,
+# not a token regex plus a list of names to reject. A denylist cannot work here:
+# HTTP field names are case-insensitive, so `Host`, `PROXY-AUTHORIZATION` and
+# `CoNnEcTiOn` all slip past a lowercase membership test, and anything simply
+# absent from the list would pass. Names are stripped and lowercased before the
+# membership test; the regex stays only as a syntax check on top of it.
+ALLOWED_OUTBOUND_HEADERS = frozenset(
+    {
+        'accept',
+        'accept-language',
+        'authorization',
+        'user-agent',
+        'x-api-key',
+    }
+)
+
+HEADER_NAME_PATTERN = re.compile(r'^[A-Za-z0-9-]+$')
+
+
+def is_allowed_outbound_header(name):
+    """True when a client-supplied outbound header name may be forwarded."""
+    normalized = name.strip().lower()
+    if not HEADER_NAME_PATTERN.match(normalized):
+        return False
+    return normalized in ALLOWED_OUTBOUND_HEADERS
 
 
 @bp.route('/')
@@ -93,7 +121,14 @@ def process_json():
                 header_name = request.form.get('api_key_header', 'X-API-Key')
                 api_key = request.form.get('api_key', '')
                 if api_key:
-                    headers[header_name] = api_key
+                    if not is_allowed_outbound_header(header_name):
+                        return jsonify(
+                            {
+                                'error': 'Header name is not permitted. Allowed: '
+                                + ', '.join(sorted(ALLOWED_OUTBOUND_HEADERS))
+                            }
+                        ), 400
+                    headers[header_name.strip()] = api_key
             elif auth_method == 'basic':
                 username = request.form.get('basic_username', '')
                 password = request.form.get('basic_password', '')

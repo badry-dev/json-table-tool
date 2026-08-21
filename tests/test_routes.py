@@ -621,3 +621,83 @@ class TestApiFetchJsonlErrors:
         assert 'Unexpected error' not in logged
         assert 'bad json' not in logged
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+class TestOutboundHeaderAllowlist:
+    """F4 - the client supplies the outbound header NAME; only an allowlist passes."""
+
+    REJECTED = [
+        'Host',
+        'host',
+        'HOST',
+        'Content-Length',
+        'Transfer-Encoding',
+        'Connection',
+        'CoNnEcTiOn',
+        'Proxy-Authorization',
+        'PROXY-AUTHORIZATION',
+        'Cookie',
+        'X-CSRF-Token',
+        ' Host ',
+        'Host\t',
+        'X Api Key',
+        'X-Api-Key:',
+        '',
+    ]
+
+    def _fetch(self, client, header_name):
+        return client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'auth_method': 'api_key',
+                'api_key_header': header_name,
+                'api_key': 'secret',
+                'json_path': '(root)',
+            },
+        )
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_reserved_and_hop_by_hop_names_rejected(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+
+        for name in self.REJECTED:
+            response = self._fetch(client, name)
+            assert response.status_code == 400, f'{name!r} was accepted'
+            assert 'not permitted' in json.loads(response.data)['error']
+
+        # Nothing was ever sent upstream.
+        assert mock_get.call_count == 0
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_permitted_header_in_unusual_case_is_forwarded(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'[{"id": 1}]']
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = self._fetch(client, '  x-API-kEy  ')
+        assert json.loads(response.data)['success'] is True
+
+        _, kwargs = mock_get.call_args
+        assert kwargs['headers'] == {'x-API-kEy': 'secret'}
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_default_header_still_works(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'[{"id": 1}]']
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = self._fetch(client, 'X-API-Key')
+        assert json.loads(response.data)['success'] is True
+        _, kwargs = mock_get.call_args
+        assert kwargs['headers'] == {'X-API-Key': 'secret'}
