@@ -102,6 +102,11 @@ class Config:
     SESSION_COOKIE_SAMESITE = 'Lax'
     SESSION_COOKIE_SECURE = is_production()
 
+    # Static assets are revalidated on every navigation without this, costing a
+    # round trip per page load -- worst on a Render free-tier cold start (P6).
+    # Safe to cache for a day because the asset URLs carry ?v=APP_VERSION.
+    SEND_FILE_MAX_AGE_DEFAULT = env_int('STATIC_MAX_AGE', 86400)
+
     # Responses smaller than this are not worth a gzip round trip (P1).
     GZIP_MIN_SIZE = env_int('GZIP_MIN_SIZE', 1024)
 

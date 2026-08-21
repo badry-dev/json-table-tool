@@ -1258,3 +1258,24 @@ class TestGzipCompression:
         )
         # XLSX is a zip container; re-compressing it wastes CPU for nothing.
         assert 'Content-Encoding' not in response.headers
+
+
+class TestStaticAssetCaching:
+    """P6 - static assets are cacheable, and their URLs are version-busted."""
+
+    def test_static_assets_carry_a_max_age(self, client):
+        response = client.get('/static/css/style.css')
+        assert response.status_code == 200
+        assert 'max-age=86400' in response.headers['Cache-Control']
+
+    def test_asset_urls_are_version_busted(self, client, app):
+        html = client.get('/').data.decode('utf-8')
+        version = app.config['APP_VERSION']
+        assert f'css/style.css?v={version}' in html
+        assert f'js/app.js?v={version}' in html
+
+    def test_max_age_is_configurable(self, fresh_config):
+        cfg = fresh_config(STATIC_MAX_AGE='60')
+        app = create_app(cfg)
+        response = app.test_client().get('/static/js/app.js')
+        assert 'max-age=60' in response.headers['Cache-Control']
