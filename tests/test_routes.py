@@ -846,3 +846,57 @@ class TestIntegerConfigValidation:
     def test_valid_value_is_applied(self, fresh_config):
         cfg = fresh_config(PREVIEW_ROW_LIMIT=' 7 ')
         assert cfg.PREVIEW_ROW_LIMIT == 7
+
+
+class TestRecursionDepth:
+    """F8 - a pathologically nested document is a 400, never a 500."""
+
+    @staticmethod
+    def _deep_json(depth):
+        return '{"a":' * depth + '1' + '}' * depth
+
+    def test_deeply_nested_paste_returns_400(self, client, caplog):
+        with caplog.at_level(logging.DEBUG):
+            response = client.post(
+                '/process',
+                data={'input_method': 'paste', 'pasted_json': self._deep_json(1500)},
+            )
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'JSON nesting too deep'
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_deeply_nested_upload_returns_400(self, client):
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'file',
+                'json_file': (io.BytesIO(self._deep_json(1500).encode()), 'deep.json'),
+            },
+            content_type='multipart/form-data',
+        )
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'JSON nesting too deep'
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_deeply_nested_api_response_returns_400(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [self._deep_json(1500).encode()]
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        response = client.post(
+            '/process',
+            data={'input_method': 'api', 'api_url': 'https://api.example.com/data'},
+        )
+        assert response.status_code == 400
+
+    def test_moderately_nested_document_still_works(self, client):
+        payload = json.dumps({'rows': [{'id': 1}, {'id': 2}]})
+        response = client.post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'rows'},
+        )
+        assert json.loads(response.data)['total_rows'] == 2

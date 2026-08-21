@@ -147,3 +147,32 @@ class TestGetAllColumns:
     def test_non_dict_rows_ignored(self):
         data = [{'a': 1}, 'not a dict', {'b': 2}]
         assert get_all_columns(data) == ['a', 'b']
+
+
+class TestExtractTableDataDepthGuard:
+    """F8 - extract_table_data must not recurse without a bound."""
+
+    @staticmethod
+    def _nest(depth):
+        """Build a depth-N chain of dicts iteratively (no recursion in the test)."""
+        node = {'leaf': 'value'}
+        for _ in range(depth):
+            node = {'a': node}
+        return node
+
+    def test_deep_nesting_does_not_raise(self):
+        result = extract_table_data(self._nest(1500))
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_stops_at_max_depth(self):
+        # With max_depth=3 the descent stops before reaching the array.
+        data = {'a': {'b': {'c': {'d': [{'x': 1}]}}}}
+        assert extract_table_data(data, max_depth=3) == [{'d': [{'x': 1}]}]
+
+    def test_shallow_data_is_unaffected_by_the_guard(self):
+        data = {'data': {'users': [{'name': 'Alice'}]}}
+        assert extract_table_data(data) == [{'name': 'Alice'}]
+
+    def test_non_dict_at_the_cap_yields_no_rows(self):
+        assert extract_table_data('scalar', _depth=99, max_depth=10) == []

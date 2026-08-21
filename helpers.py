@@ -72,12 +72,20 @@ def sanitize_cell(value):
     return serialized
 
 
-def extract_table_data(json_data):
+def extract_table_data(json_data, _depth=0, max_depth=10):
     """
     Extract tabular data from JSON.
     Handles arrays of objects, nested arrays, and single objects.
     Returns a list of row dicts.
+
+    Mirrors flatten_for_csv's depth cap (F8): a payload nested a thousand levels
+    deep is valid JSON, and without the cap the descent into nested dicts blows
+    the Python stack and turns a client-supplied document into a 500. At the cap
+    the remaining structure becomes a single row rather than being explored.
     """
+    if _depth >= max_depth:
+        return [json_data] if isinstance(json_data, dict) else []
+
     if isinstance(json_data, list):
         if len(json_data) > 0 and isinstance(json_data[0], dict):
             return json_data
@@ -94,7 +102,7 @@ def extract_table_data(json_data):
 
         for value in json_data.values():
             if isinstance(value, dict):
-                result = extract_table_data(value)
+                result = extract_table_data(value, _depth=_depth + 1, max_depth=max_depth)
                 if result:
                     return result
 

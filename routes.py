@@ -204,7 +204,9 @@ def process_json():
             if selected is None:
                 return jsonify({'error': f'Path "{json_path}" not found'}), 400
             if isinstance(selected, list):
-                table_data = extract_table_data(selected)
+                table_data = extract_table_data(
+                    selected, max_depth=current_app.config['FLATTEN_MAX_DEPTH']
+                )
             elif isinstance(selected, dict):
                 table_data = [selected]
             else:
@@ -237,6 +239,12 @@ def process_json():
             }
         )
 
+    except RecursionError:
+        # Valid JSON can nest deeply enough to exhaust the C stack, in json.loads
+        # itself, in the helpers, or in the response encoder. That is the caller's
+        # document, so it is a 400 -- and it is not worth an exception traceback
+        # in the logs (F8).
+        return jsonify({'error': 'JSON nesting too deep'}), 400
     except Exception:
         logger.exception('Unexpected error in process_json')
         return jsonify({'error': 'An internal error occurred'}), 500
