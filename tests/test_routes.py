@@ -1,6 +1,7 @@
 """Tests for Flask routes."""
 
 import csv
+import gzip
 import importlib
 import io
 import json
@@ -9,7 +10,7 @@ import re
 from unittest.mock import MagicMock, patch
 
 import pytest
-from flask import request
+from flask import Response, request
 
 import config as config_module
 from app import create_app
@@ -1165,3 +1166,95 @@ class TestHealthVersionGate:
         app = create_app(cfg)
         data = json.loads(app.test_client().get('/health').data)
         assert data == {'status': 'ok'}
+
+
+class TestGzipCompression:
+    """P1 - compress large text/JSON bodies, and nothing else."""
+
+    @staticmethod
+    def _big_payload(rows=400):
+        return json.dumps([{'id': i, 'name': f'user-{i}', 'note': 'x' * 60} for i in range(rows)])
+
+    def _process(self, client, **headers):
+        return client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': self._big_payload(),
+                'json_path': '(root)',
+            },
+            headers=headers,
+        )
+
+    def test_large_json_is_compressed(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'gzip, deflate'})
+
+        assert response.headers['Content-Encoding'] == 'gzip'
+        assert 'Accept-Encoding' in response.headers['Vary']
+
+        raw = response.get_data()
+        decompressed = gzip.decompress(raw)
+        assert json.loads(decompressed)['total_rows'] == 400
+        assert len(raw) < len(decompressed)
+        # Content-Length must describe what is actually on the wire.
+        assert int(response.headers['Content-Length']) == len(raw)
+
+    def test_not_compressed_without_accept_encoding(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'identity'})
+        assert 'Content-Encoding' not in response.headers
+        assert 'Accept-Encoding' in response.headers['Vary']
+        assert json.loads(response.data)['total_rows'] == 400
+
+    def test_small_response_is_not_compressed(self, client):
+        response = client.get('/health', headers={'Accept-Encoding': 'gzip'})
+        assert 'Content-Encoding' not in response.headers
+        assert json.loads(response.data)['status'] == 'ok'
+
+    def test_vary_is_not_duplicated(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'gzip'})
+        varies = [v.strip().lower() for v in response.headers.get_all('Vary')]
+        assert varies.count('accept-encoding') == 1
+
+    def test_head_request_is_left_alone(self, client):
+        response = client.head('/', headers={'Accept-Encoding': 'gzip'})
+        assert 'Content-Encoding' not in response.headers
+
+    def test_already_encoded_body_is_left_alone(self, app):
+        app.config['PROPAGATE_EXCEPTIONS'] = False
+
+        @app.route('/pre-encoded')
+        def _pre_encoded():
+            payload = gzip.compress(b'{"already": "' + b'x' * 5000 + b'"}')
+            return Response(
+                payload,
+                mimetype='application/json',
+                headers={'Content-Encoding': 'gzip'},
+            )
+
+        response = app.test_client().get('/pre-encoded', headers={'Accept-Encoding': 'gzip'})
+        # Not double-compressed: one gzip layer decodes to the original JSON.
+        assert response.headers['Content-Encoding'] == 'gzip'
+        assert gzip.decompress(response.get_data()).startswith(b'{"already"')
+
+    def test_streamed_response_is_left_alone(self, app):
+        @app.route('/streamed')
+        def _streamed():
+            def generate():
+                for index in range(500):
+                    yield f'line {index} ' + 'y' * 40 + '\n'
+
+            return Response(generate(), mimetype='text/plain')
+
+        response = app.test_client().get('/streamed', headers={'Accept-Encoding': 'gzip'})
+        assert 'Content-Encoding' not in response.headers
+        assert response.get_data().startswith(b'line 0 ')
+
+    def test_binary_export_is_not_compressed(self, client):
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': 'x' * 100}] * 50, 'csv_columns': ['a']}),
+            content_type='application/json',
+            headers={'Accept-Encoding': 'gzip'},
+        )
+        # XLSX is a zip container; re-compressing it wastes CPU for nothing.
+        assert 'Content-Encoding' not in response.headers

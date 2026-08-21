@@ -102,6 +102,9 @@ class Config:
     SESSION_COOKIE_SAMESITE = 'Lax'
     SESSION_COOKIE_SECURE = is_production()
 
+    # Responses smaller than this are not worth a gzip round trip (P1).
+    GZIP_MIN_SIZE = env_int('GZIP_MIN_SIZE', 1024)
+
     # Application metadata
     APP_VERSION = '1.1.0'
 

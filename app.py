@@ -1,6 +1,8 @@
 """JSON Table Converter - Flask application factory."""
 
-from flask import Flask, jsonify
+import gzip
+
+from flask import Flask, current_app, jsonify, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import DEV_SECRET_KEY, Config, is_production
@@ -25,6 +27,76 @@ def _assert_production_secret_key(app):
             'SECRET_KEY must be set to a random value when APP_ENV=production; '
             'the built-in development key is public.'
         )
+
+
+# --- gzip (P1/D1) -----------------------------------------------------------
+#
+# /process returns the full flattened dataset, so a 10 MB input commonly means a
+# 5-20 MB response body. Repetitive JSON compresses 5-10x, which is the single
+# largest transfer win available. Implemented in-repo rather than via
+# Flask-Compress: ~40 lines against a new pinned dependency (D1).
+#
+# It does NOT reduce peak server memory or the client's parse cost -- the browser
+# still receives, decompresses and stores the whole dataset. Those are P2/P5/P12.
+
+COMPRESSIBLE_MIMETYPES = frozenset(
+    {
+        'application/json',
+        'application/javascript',
+        'application/xml',
+        'image/svg+xml',
+    }
+)
+
+
+def _mark_varies_on_encoding(response):
+    """Add Accept-Encoding to Vary without duplicating an existing entry."""
+    existing = [value.strip().lower() for value in response.headers.get('Vary', '').split(',')]
+    if 'accept-encoding' not in existing:
+        response.headers.add('Vary', 'Accept-Encoding')
+
+
+def _is_compressible(response):
+    mimetype = (response.mimetype or '').lower()
+    return (
+        mimetype.startswith('text/')
+        or mimetype.endswith('+json')
+        or (mimetype in COMPRESSIBLE_MIMETYPES)
+    )
+
+
+def compress_response(response):
+    """Gzip an eligible response body in place."""
+    # A streamed or passthrough body must never be materialized here: reading it
+    # would consume the generator the export routes rely on.
+    if response.direct_passthrough or response.is_streamed:
+        return response
+    # 204/304 carry no body; HEAD must keep the headers a GET would produce, and
+    # rewriting Content-Length for a body we do not send would be wrong.
+    if response.status_code in (204, 304) or request.method == 'HEAD':
+        return response
+    if 'Content-Encoding' in response.headers:
+        return response
+    if not _is_compressible(response):
+        return response
+
+    _mark_varies_on_encoding(response)
+
+    if 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
+        return response
+
+    data = response.get_data()
+    if len(data) < current_app.config.get('GZIP_MIN_SIZE', 1024):
+        return response
+
+    compressed = gzip.compress(data, compresslevel=6)
+    if len(compressed) >= len(data):
+        return response
+
+    # set_data recomputes Content-Length, so it always matches what we send.
+    response.set_data(compressed)
+    response.headers['Content-Encoding'] = 'gzip'
+    return response
 
 
 def _register_error_handlers(app):
@@ -71,6 +143,7 @@ def create_app(config_class=Config):
 
     # Security headers on every response
     app.after_request(apply_security_headers)
+    app.after_request(compress_response)
 
     _register_error_handlers(app)
 
