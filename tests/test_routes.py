@@ -1,11 +1,17 @@
 """Tests for Flask routes."""
 
 import csv
+import importlib
 import io
 import json
 import logging
 import re
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+import config as config_module
+from app import create_app
 
 
 class TestIndexRoute:
@@ -750,3 +756,93 @@ class TestOutboundHeaderAllowlist:
         assert json.loads(response.data)['success'] is True
         _, kwargs = mock_get.call_args
         assert kwargs['headers'] == {'X-API-Key': 'secret'}
+
+
+@pytest.fixture
+def fresh_config(monkeypatch):
+    """
+    Rebuild config.Config from the current environment.
+
+    Config holds class attributes evaluated at import time, so a monkeypatched
+    env var only takes effect after a reload. F7 rules out constructing
+    Config(...) -- it is a class, not a constructor.
+    """
+
+    def build(**env):
+        for name, value in env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        return importlib.reload(config_module).Config
+
+    yield build
+    # Leave the module holding the pristine values for every later test.
+    monkeypatch.undo()
+    importlib.reload(config_module)
+
+
+class TestProductionSecretKey:
+    """F7 - the dev SECRET_KEY must not survive into production."""
+
+    def test_production_with_default_key_refuses_to_start(self, fresh_config):
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY=None)
+        with pytest.raises(RuntimeError, match='SECRET_KEY must be set'):
+            create_app(cfg)
+
+    def test_production_with_empty_key_refuses_to_start(self, fresh_config):
+        # A misconfigured secrets manager produces '' rather than "unset".
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY='')
+        with pytest.raises(RuntimeError, match='SECRET_KEY must be set'):
+            create_app(cfg)
+
+    def test_production_with_real_key_starts(self, fresh_config):
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY='a-real-random-value')
+        app = create_app(cfg)
+        assert app.config['SECRET_KEY'] == 'a-real-random-value'
+
+    def test_local_run_with_default_key_starts(self, fresh_config):
+        # `python app.py` has DEBUG False, so gating on `not DEBUG` would have
+        # blocked the documented local run.
+        cfg = fresh_config(APP_ENV=None, SECRET_KEY=None, FLASK_DEBUG=None)
+        assert cfg.DEBUG is False
+        app = create_app(cfg)
+        assert app.config['SECRET_KEY'] == config_module.DEV_SECRET_KEY
+
+    def test_second_spelling_is_not_a_production_signal(self, fresh_config):
+        # Accepting PRODUCTION=true as well would let a deployment pass this gate
+        # while SESSION_COOKIE_SECURE (F16) stayed off.
+        cfg = fresh_config(APP_ENV=None, PRODUCTION='true', SECRET_KEY=None)
+        assert config_module.is_production() is False
+        create_app(cfg)
+
+    def test_app_env_is_case_and_space_insensitive(self, fresh_config):
+        fresh_config(APP_ENV='  Production  ')
+        assert config_module.is_production() is True
+
+
+class TestIntegerConfigValidation:
+    """F7 - a mistyped integer setting must name the variable, not raise ValueError."""
+
+    INT_SETTINGS = [
+        'MAX_UPLOAD_SIZE',
+        'PREVIEW_ROW_LIMIT',
+        'API_FETCH_TIMEOUT',
+        'API_FETCH_MAX_RESPONSE',
+        'FLATTEN_MAX_DEPTH',
+    ]
+
+    def test_each_integer_setting_reports_a_clear_error(self, fresh_config):
+        for name in self.INT_SETTINGS:
+            with pytest.raises(RuntimeError, match=f'{name} must be an integer'):
+                fresh_config(**{name: 'abc'})
+            # Undo before the next iteration so errors do not stack.
+            fresh_config(**{name: None})
+
+    def test_blank_value_falls_back_to_the_default(self, fresh_config):
+        cfg = fresh_config(PREVIEW_ROW_LIMIT='   ')
+        assert cfg.PREVIEW_ROW_LIMIT == 25
+
+    def test_valid_value_is_applied(self, fresh_config):
+        cfg = fresh_config(PREVIEW_ROW_LIMIT=' 7 ')
+        assert cfg.PREVIEW_ROW_LIMIT == 7
