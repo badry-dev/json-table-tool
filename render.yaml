@@ -15,5 +15,6 @@ services:
     # Free tier settings
     plan: free
     # No persistent disk = no data storage
-    # Auto-deploy on push
-    autoDeploy: true
+    # Auto-deploy on push, but only once CI checks pass. Render blocks the
+    # deploy when the commit has failing checks or no checks at all.
+    autoDeployTrigger: checksPass
