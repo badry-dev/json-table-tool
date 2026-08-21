@@ -9,6 +9,7 @@ import re
 import requests
 from flask import Blueprint, Response, current_app, jsonify, render_template, request
 from requests.auth import HTTPBasicAuth
+from werkzeug.exceptions import HTTPException
 
 from extensions import limiter
 from helpers import (
@@ -46,6 +47,40 @@ ALLOWED_OUTBOUND_HEADERS = frozenset(
 
 HEADER_NAME_PATTERN = re.compile(r'^[A-Za-z0-9-]+$')
 
+# F13: `accept=".json,.jsonl"` on the file input is client-side only. The
+# extension check is the authoritative one; the content-type check is deliberately
+# lenient because browsers send application/octet-stream (or nothing at all) for
+# extensions they do not recognize -- .jsonl in particular -- so a strict list
+# would reject legitimate uploads.
+ALLOWED_UPLOAD_EXTENSIONS = ('.json', '.jsonl')
+
+ALLOWED_UPLOAD_CONTENT_TYPES = frozenset(
+    {
+        '',
+        'application/json',
+        'application/jsonl',
+        'application/ld+json',
+        'application/octet-stream',
+        'application/x-ndjson',
+        'text/json',
+        'text/plain',
+        'text/x-json',
+    }
+)
+
+
+def validate_upload(file_storage):
+    """Return an error message for a file we will not try to parse, else None."""
+    filename = (file_storage.filename or '').strip().lower()
+    if not filename.endswith(ALLOWED_UPLOAD_EXTENSIONS):
+        return 'File must be a .json or .jsonl file'
+
+    content_type = (file_storage.mimetype or '').strip().lower()
+    if content_type not in ALLOWED_UPLOAD_CONTENT_TYPES:
+        return f'Unsupported content type: {content_type}'
+
+    return None
+
 
 def is_allowed_outbound_header(name):
     """True when a client-supplied outbound header name may be forwarded."""
@@ -64,7 +99,10 @@ def index():
 @bp.route('/health')
 def health():
     """Health check endpoint."""
-    return jsonify({'status': 'ok', 'version': current_app.config['APP_VERSION']})
+    payload = {'status': 'ok'}
+    if current_app.config.get('HEALTH_REVEAL_VERSION', True):
+        payload['version'] = current_app.config['APP_VERSION']
+    return jsonify(payload)
 
 
 @bp.route('/process', methods=['POST'])
@@ -83,6 +121,9 @@ def process_json():
             file = request.files['json_file']
             if file.filename == '':
                 return jsonify({'error': 'No file selected'}), 400
+            upload_error = validate_upload(file)
+            if upload_error:
+                return jsonify({'error': upload_error}), 400
             try:
                 content = file.read().decode('utf-8')
                 json_data = parse_jsonl(content) if data_format == 'jsonl' else json.loads(content)
@@ -239,6 +280,12 @@ def process_json():
             }
         )
 
+    except HTTPException:
+        # Werkzeug raises these lazily inside the route -- RequestEntityTooLarge
+        # fires the first time the oversized body is read. They already carry the
+        # right status, so let Flask's error handlers render them as JSON (F10)
+        # instead of swallowing them into a 500 below.
+        raise
     except RecursionError:
         # Valid JSON can nest deeply enough to exhaust the C stack, in json.loads
         # itself, in the helpers, or in the response encoder. That is the caller's
@@ -299,6 +346,8 @@ def export_csv():
             },
         )
 
+    except HTTPException:
+        raise
     except Exception:
         logger.exception('Unexpected error in export_csv')
         return jsonify({'error': 'Export failed'}), 500
@@ -341,6 +390,8 @@ def export_xlsx():
             },
         )
 
+    except HTTPException:
+        raise
     except Exception:
         logger.exception('Unexpected error in export_xlsx')
         return jsonify({'error': 'Export failed'}), 500

@@ -997,3 +997,171 @@ class TestProxyAwareRateLimiting:
             keys.append(seen['key'])
 
         assert keys == ['9.9.9.9', '8.8.8.8']
+
+
+class TestJsonErrorHandlers:
+    """F10 - every error response is JSON, including the framework's own."""
+
+    def test_oversized_request_returns_json_413(self, fresh_config):
+        cfg = fresh_config(MAX_UPLOAD_SIZE=str(1024 * 1024))
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': 'x' * (2 * 1024 * 1024)},
+        )
+
+        assert response.status_code == 413
+        assert response.content_type.startswith('application/json')
+        assert json.loads(response.data)['error'] == 'Request too large (max 1MB)'
+
+    def test_unknown_route_returns_json_404(self, client):
+        response = client.get('/no-such-route')
+        assert response.status_code == 404
+        assert response.content_type.startswith('application/json')
+        assert 'error' in json.loads(response.data)
+
+    def test_internal_error_returns_json_500(self, fresh_config):
+        cfg = fresh_config()
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+        # TESTING would re-raise instead of routing to the handler.
+        app.config['PROPAGATE_EXCEPTIONS'] = False
+
+        @app.route('/boom')
+        def _boom():
+            raise RuntimeError('kaboom')
+
+        response = app.test_client().get('/boom')
+        assert response.status_code == 500
+        assert response.content_type.startswith('application/json')
+        assert json.loads(response.data)['error'] == 'An internal error occurred'
+        assert b'kaboom' not in response.data
+
+
+class TestNoStoreCacheControl:
+    """F11 - data-bearing responses must not be retained by any cache."""
+
+    def test_health_is_no_store(self, client):
+        assert client.get('/health').headers['Cache-Control'] == 'no-store'
+
+    def test_process_is_no_store(self, client):
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': '[{"a": 1}]',
+                'json_path': '(root)',
+            },
+        )
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_export_csv_is_no_store(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': 1}], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_export_xlsx_is_no_store(self, client):
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': 1}], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_index_page_is_still_cacheable(self, client):
+        assert client.get('/').headers.get('Cache-Control') != 'no-store'
+
+
+class TestUploadValidation:
+    """F13 - the server, not just the file input's accept attribute."""
+
+    def _upload(self, client, filename, content_type=None, body=b'[{"a": 1}]'):
+        data = {
+            'input_method': 'file',
+            'json_path': '(root)',
+            'json_file': (io.BytesIO(body), filename, content_type)
+            if content_type is not None
+            else (io.BytesIO(body), filename),
+        }
+        return client.post('/process', data=data, content_type='multipart/form-data')
+
+    def test_rejects_unexpected_extensions(self, client):
+        for filename in ('evil.txt', 'evil.exe', 'evil', 'evil.json.png', 'evil.csv'):
+            response = self._upload(client, filename)
+            assert response.status_code == 400, filename
+            assert '.json or .jsonl' in json.loads(response.data)['error']
+
+    def test_rejects_unexpected_content_type(self, client):
+        response = self._upload(client, 'data.json', content_type='image/png')
+        assert response.status_code == 400
+        assert 'Unsupported content type' in json.loads(response.data)['error']
+
+    def test_accepts_json_and_jsonl(self, client):
+        assert json.loads(self._upload(client, 'data.json').data)['success'] is True
+        assert json.loads(self._upload(client, 'DATA.JSON').data)['success'] is True
+
+    def test_accepts_the_octet_stream_browsers_send_for_jsonl(self, client):
+        response = self._upload(
+            client,
+            'data.jsonl',
+            content_type='application/octet-stream',
+            body=b'{"a": 1}',
+        )
+        assert response.status_code == 200
+
+
+class TestCookieHardening:
+    """F16 - explicit cookie flags, Secure tied to APP_ENV=production."""
+
+    @staticmethod
+    def _set_cookie(app):
+        app.config['TESTING'] = True
+        # The index page calls csrf_token(), which writes to the session.
+        response = app.test_client().get('/', base_url='https://localhost')
+        return response.headers.get('Set-Cookie', '')
+
+    def test_local_run_flags(self, fresh_config):
+        cfg = fresh_config(APP_ENV=None)
+        assert cfg.SESSION_COOKIE_HTTPONLY is True
+        assert cfg.SESSION_COOKIE_SAMESITE == 'Lax'
+        assert cfg.SESSION_COOKIE_SECURE is False
+
+        cookie = self._set_cookie(create_app(cfg))
+        assert 'HttpOnly' in cookie
+        assert 'SameSite=Lax' in cookie
+        assert 'Secure' not in cookie
+
+    def test_production_sets_secure(self, fresh_config):
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY='a-real-random-value')
+        assert cfg.SESSION_COOKIE_SECURE is True
+
+        cookie = self._set_cookie(create_app(cfg))
+        assert 'Secure' in cookie
+        assert 'HttpOnly' in cookie
+        assert 'SameSite=Lax' in cookie
+
+
+class TestHealthVersionGate:
+    """F15 - version is returned by default; the gate only lets operators opt out."""
+
+    def test_version_present_by_default(self, fresh_config):
+        cfg = fresh_config(HEALTH_REVEAL_VERSION=None)
+        assert cfg.HEALTH_REVEAL_VERSION is True
+
+        app = create_app(cfg)
+        data = json.loads(app.test_client().get('/health').data)
+        assert data['status'] == 'ok'
+        assert data['version'] == cfg.APP_VERSION
+
+    def test_version_hidden_when_disabled(self, fresh_config):
+        cfg = fresh_config(HEALTH_REVEAL_VERSION='0')
+        assert cfg.HEALTH_REVEAL_VERSION is False
+
+        app = create_app(cfg)
+        data = json.loads(app.test_client().get('/health').data)
+        assert data == {'status': 'ok'}

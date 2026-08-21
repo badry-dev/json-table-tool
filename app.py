@@ -1,6 +1,6 @@
 """JSON Table Converter - Flask application factory."""
 
-from flask import Flask
+from flask import Flask, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import DEV_SECRET_KEY, Config, is_production
@@ -27,6 +27,29 @@ def _assert_production_secret_key(app):
         )
 
 
+def _register_error_handlers(app):
+    """
+    Keep every error response JSON (F10).
+
+    Flask's built-in 413 and 500 pages are HTML, so app.js's response.json()
+    threw a SyntaxError on the body and surfaced a parse error instead of the
+    real problem. Every other error path in this app returns {"error": ...}.
+    """
+
+    @app.errorhandler(413)
+    def _request_entity_too_large(_error):
+        limit = app.config.get('MAX_CONTENT_LENGTH') or 0
+        return jsonify({'error': f'Request too large (max {limit // (1024 * 1024)}MB)'}), 413
+
+    @app.errorhandler(500)
+    def _internal_server_error(_error):
+        return jsonify({'error': 'An internal error occurred'}), 500
+
+    @app.errorhandler(404)
+    def _not_found(_error):
+        return jsonify({'error': 'Not found'}), 404
+
+
 def create_app(config_class=Config):
     """Create and configure the Flask application."""
     app = Flask(__name__)
@@ -48,6 +71,8 @@ def create_app(config_class=Config):
 
     # Security headers on every response
     app.after_request(apply_security_headers)
+
+    _register_error_handlers(app)
 
     # Register routes
     from routes import bp

@@ -93,8 +93,25 @@ class Config:
     RATE_LIMIT_PROCESS = os.environ.get('RATE_LIMIT_PROCESS', '30/minute')
     RATE_LIMIT_EXPORT = os.environ.get('RATE_LIMIT_EXPORT', '60/minute')
 
+    # Cookie hardening (F16). Flask's defaults are HttpOnly=True but emit no
+    # SameSite attribute and never set Secure. Secure is tied to the explicit
+    # production signal: a plain local run has DEBUG False, so gating on
+    # `not DEBUG` would send Secure cookies over http and break CSRF-protected
+    # POSTs during development.
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    SESSION_COOKIE_SECURE = is_production()
+
     # Application metadata
     APP_VERSION = '1.1.0'
+
+    # F15: /health returns `version` by default (the existing contract). Operators
+    # who would rather not advertise it can set HEALTH_REVEAL_VERSION=0.
+    HEALTH_REVEAL_VERSION = os.environ.get('HEALTH_REVEAL_VERSION', '1').strip().lower() not in (
+        '0',
+        'false',
+        'no',
+    )
 
     # Debug mode
     DEBUG = os.environ.get('FLASK_DEBUG', '0').lower() in ('1', 'true', 'yes')

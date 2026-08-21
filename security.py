@@ -31,6 +31,18 @@ CSP_DIRECTIVES = (
 
 CONTENT_SECURITY_POLICY = '; '.join(CSP_DIRECTIVES)
 
+# Responses that carry payload data (or ops state) must not be retained by a
+# shared cache, a proxy or the browser's bfcache (F11). The index page and the
+# static assets are deliberately absent -- they are cacheable (P6).
+NO_STORE_ENDPOINTS = frozenset(
+    {
+        'main.process_json',
+        'main.export_csv',
+        'main.export_xlsx',
+        'main.health',
+    }
+)
+
 
 # --- Bounded DNS admission (F6.1 / P7) --------------------------------------
 #
@@ -247,6 +259,9 @@ def apply_security_headers(response):
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
     response.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
     response.headers['Content-Security-Policy'] = CONTENT_SECURITY_POLICY
+
+    if request.endpoint in NO_STORE_ENDPOINTS:
+        response.headers['Cache-Control'] = 'no-store'
 
     # HSTS only makes sense once the connection is already TLS; sending it over
     # plain http would pin a local dev server to https. request.is_secure reads
