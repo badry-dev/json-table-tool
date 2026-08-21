@@ -33,6 +33,45 @@ def flatten_for_csv(data, parent_key='', sep='.', _depth=0, max_depth=10):
     return dict(items)
 
 
+# Characters that make a spreadsheet treat a cell as a formula (or let it smuggle
+# extra rows/fields past a delimited parser). OWASP lists all seven.
+FORMULA_TRIGGERS = ('=', '+', '-', '@', '\t', '\r', '\n')
+
+
+def serialize_cell_value(value):
+    """
+    Reduce one cell value to the scalar an export writer can emit.
+
+    Containers become their JSON text; everything else is passed through
+    unchanged so numbers stay numbers in the workbook.
+    """
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return value
+
+
+def is_formula_trigger(value):
+    """True when a serialized value would be read as a formula by a spreadsheet."""
+    return isinstance(value, str) and value.startswith(FORMULA_TRIGGERS)
+
+
+def sanitize_cell(value):
+    """
+    Serialize a cell for the delimited formats (CSV/TSV) and defuse formula
+    injection (CWE-1236).
+
+    Delimited output has no type channel, so a dangerous value is prefixed with a
+    single quote -- the OWASP mitigation for CSV. XLSX does not use this: it has a
+    real string type, so `export_xlsx` writes the untouched value and pins the
+    cell's data_type instead (see `is_formula_trigger`). Lossless exports (JSONL)
+    and Markdown must not call this.
+    """
+    serialized = serialize_cell_value(value)
+    if is_formula_trigger(serialized):
+        return "'" + serialized
+    return serialized
+
+
 def extract_table_data(json_data):
     """
     Extract tabular data from JSON.

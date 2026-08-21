@@ -15,7 +15,10 @@ from helpers import (
     extract_table_data,
     flatten_for_csv,
     get_all_columns,
+    is_formula_trigger,
     parse_jsonl,
+    sanitize_cell,
+    serialize_cell_value,
 )
 from security import validate_url
 
@@ -195,6 +198,23 @@ def process_json():
         return jsonify({'error': 'An internal error occurred'}), 500
 
 
+def _append_xlsx_row(ws, values):
+    """
+    Append one row to a worksheet, writing formula-triggering strings as strings.
+
+    openpyxl serializes a str starting with '=' as a formula cell, so Excel would
+    evaluate an attacker-supplied value on open (F1). XLSX carries an explicit
+    type per cell, so the fix is to pin data_type rather than mangle the text the
+    way the delimited exports have to.
+    """
+    serialized = [serialize_cell_value(value) for value in values]
+    ws.append(serialized)
+    row_index = ws.max_row
+    for column_index, value in enumerate(serialized, start=1):
+        if is_formula_trigger(value):
+            ws.cell(row=row_index, column=column_index).data_type = 's'
+
+
 @bp.route('/export-csv', methods=['POST'])
 @limiter.limit(lambda: current_app.config.get('RATE_LIMIT_EXPORT', '60/minute'))
 def export_csv():
@@ -211,17 +231,11 @@ def export_csv():
             return jsonify({'error': 'No data to export'}), 400
 
         output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=csv_columns, extrasaction='ignore')
-        writer.writeheader()
+        writer = csv.writer(output)
+        writer.writerow([sanitize_cell(col) for col in csv_columns])
 
         for row in csv_data:
-            clean_row = {}
-            for k, v in row.items():
-                if isinstance(v, (dict, list)):
-                    clean_row[k] = json.dumps(v)
-                else:
-                    clean_row[k] = v
-            writer.writerow(clean_row)
+            writer.writerow([sanitize_cell(row.get(col, '')) for col in csv_columns])
 
         output.seek(0)
         return Response(
@@ -259,18 +273,9 @@ def export_xlsx():
         ws = wb.active
         ws.title = 'Data'
 
-        # Header row
-        ws.append(xlsx_columns)
-
-        # Data rows
+        _append_xlsx_row(ws, xlsx_columns)
         for row in xlsx_data:
-            row_values = []
-            for col in xlsx_columns:
-                v = row.get(col, '')
-                if isinstance(v, (dict, list)):
-                    v = json.dumps(v)
-                row_values.append(v)
-            ws.append(row_values)
+            _append_xlsx_row(ws, [row.get(col, '') for col in xlsx_columns])
 
         output = io.BytesIO()
         wb.save(output)

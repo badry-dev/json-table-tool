@@ -478,8 +478,34 @@ document.querySelectorAll('.export-dropdown-item').forEach(item => {
     });
 });
 
-// Client-side CSV/TSV generation
-function downloadDelimited(columns, data, delimiter, filename) {
+// Spreadsheet formula triggers (OWASP). Must stay in sync with
+// helpers.FORMULA_TRIGGERS on the server.
+function formulaTriggers() {
+    return ['=', '+', '-', '@', '\t', '\r', '\n'];
+}
+
+// Reduce a cell to the scalar a writer emits. Containers become their JSON text.
+function serializeCellValue(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return value;
+}
+
+// Defuse CSV/TSV formula injection (CWE-1236) by prefixing a dangerous value
+// with a single quote. Delimited output carries no type channel, so this is the
+// only place the value can be marked as text. JSONL and Markdown exports are
+// deliberately NOT routed through here.
+function sanitizeCell(value) {
+    const serialized = serializeCellValue(value);
+    if (typeof serialized === 'string' && formulaTriggers().some(t => serialized.startsWith(t))) {
+        return "'" + serialized;
+    }
+    return serialized;
+}
+
+// Pure string builder, kept separate from the download so it can be asserted
+// directly (tests/js/test_export_sanitize.mjs).
+function buildDelimited(columns, data, delimiter) {
     const escape = (val) => {
         const str = String(val ?? '');
         if (str.includes(delimiter) || str.includes('"') || str.includes('\n')) {
@@ -488,15 +514,19 @@ function downloadDelimited(columns, data, delimiter, filename) {
         return str;
     };
 
-    let output = columns.map(escape).join(delimiter) + '\n';
+    let output = columns.map(col => escape(sanitizeCell(col))).join(delimiter) + '\n';
     data.forEach(row => {
-        const line = columns.map(col => {
-            let v = row[col];
-            if (typeof v === 'object' && v !== null) v = JSON.stringify(v);
-            return escape(v);
-        }).join(delimiter);
+        const line = columns
+            .map(col => escape(sanitizeCell(row[col])))
+            .join(delimiter);
         output += line + '\n';
     });
+    return output;
+}
+
+// Client-side CSV/TSV generation
+function downloadDelimited(columns, data, delimiter, filename) {
+    const output = buildDelimited(columns, data, delimiter);
 
     const mimeType = delimiter === '\t'
         ? 'text/tab-separated-values; charset=utf-8'

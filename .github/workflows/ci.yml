@@ -26,8 +26,15 @@ jobs:
       - name: Format check
         run: ruff format --check .
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Tests
         run: python -m pytest tests/ -v
+
+      - name: Client-side export assertions (F1)
+        run: node tests/js/test_export_sanitize.mjs
 
       - name: Audit runtime dependencies
         run: pip-audit -r requirements.txt

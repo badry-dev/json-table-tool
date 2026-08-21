@@ -1,5 +1,7 @@
 """Tests for Flask routes."""
 
+import csv
+import io
 import json
 from unittest.mock import MagicMock, patch
 
@@ -419,3 +421,95 @@ class TestSecurityHeaders:
     def test_referrer_policy(self, client):
         response = client.get('/')
         assert 'strict-origin' in response.headers['Referrer-Policy']
+
+
+class TestFormulaInjection:
+    """F1 - CSV/XLSX formula injection (CWE-1236)."""
+
+    DANGEROUS = ['=SUM(A1)', '@cmd', '+1', '-1', '\tlead', '\rlead', '\nlead']
+
+    def test_csv_prefixes_every_trigger(self, client):
+        rows = [{'v': value} for value in self.DANGEROUS]
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': rows, 'csv_columns': ['v']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        emitted = [row[0] for row in parsed[1:]]
+        assert emitted == ["'" + value for value in self.DANGEROUS]
+
+    def test_csv_leaves_safe_values_alone(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps(
+                {
+                    'csv_data': [{'a': 'plain', 'b': 5, 'c': 'user@example.com'}],
+                    'csv_columns': ['a', 'b', 'c'],
+                }
+            ),
+            content_type='application/json',
+        )
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        assert parsed[1] == ['plain', '5', 'user@example.com']
+
+    def test_csv_sanitizes_column_headers(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'=EVIL()': 1}], 'csv_columns': ['=EVIL()']}),
+            content_type='application/json',
+        )
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        assert parsed[0] == ["'=EVIL()"]
+
+    def test_csv_serializes_containers(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': {'k': 'v'}}], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        assert parsed[1] == ['{"k": "v"}']
+
+    def test_xlsx_writes_triggers_as_string_cells(self, client):
+        from openpyxl import load_workbook
+
+        rows = [{'v': value} for value in self.DANGEROUS]
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': rows, 'csv_columns': ['v']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+        ws = load_workbook(io.BytesIO(response.data)).active
+        for index, value in enumerate(self.DANGEROUS, start=2):
+            cell = ws.cell(row=index, column=1)
+            assert cell.data_type == 's', f'{value!r} was written as {cell.data_type}'
+            # XLSX carries an explicit type, so the text itself stays intact.
+            assert cell.value == value.replace('\r', '\n')
+
+    def test_xlsx_sanitizes_column_headers(self, client):
+        from openpyxl import load_workbook
+
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'=EVIL()': 1}], 'csv_columns': ['=EVIL()']}),
+            content_type='application/json',
+        )
+        ws = load_workbook(io.BytesIO(response.data)).active
+        assert ws.cell(row=1, column=1).data_type == 's'
+
+    def test_xlsx_keeps_numbers_numeric(self, client):
+        from openpyxl import load_workbook
+
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': -1, 'b': 2.5}], 'csv_columns': ['a', 'b']}),
+            content_type='application/json',
+        )
+        ws = load_workbook(io.BytesIO(response.data)).active
+        assert ws.cell(row=2, column=1).value == -1
+        assert ws.cell(row=2, column=2).value == 2.5
