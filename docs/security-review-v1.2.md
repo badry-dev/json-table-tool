@@ -124,7 +124,7 @@ Do not log the URL at all — query strings, fragments, userinfo, *and paths* ca
 | `Cross-Origin-Opener-Policy: same-origin` | Mitigates cross-origin window-opener attacks |
 | `Cross-Origin-Resource-Policy: same-origin` | Prevents other origins from embedding/reading our responses |
 
-Also consider `upgrade-insecure-requests` in CSP for HTTPS-only deploys.
+`upgrade-insecure-requests` is **required**, not optional: F14's completion criterion and the checklist both demand it, so the remediation here states it as mandatory for any deployment served over HTTPS (it is inert on plain-HTTP deployments, which are already out of policy per F14).
 
 **Remediation:**
 
@@ -173,10 +173,11 @@ Build the CSP as a list of directives (or keep the trailing `;` in the base stri
 **Description:** `SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')`. If an operator forgets to set it (README calls it "Required: Yes"), the app silently runs with a *publicly known* key: CSRF tokens are forgeable and the session cookie can be signed. `render.yaml` sets `generateValue: true`, but self-hosted / Docker deploys from README rely on the operator.
 
 **Remediation:**
-- In `create_app()`, after config load: when an **explicit production signal** (`APP_ENV=production` or `PRODUCTION=true`) is set and `SECRET_KEY` equals the dev default (or is `None`/empty), `raise RuntimeError('SECRET_KEY must be set in production')`. Do **not** infer production from `not DEBUG` — the documented local run `python app.py` has `DEBUG=False` by default, and gating on it would block ordinary development startup.
+- In `create_app()`, after config load: when the production signal is set and `SECRET_KEY` equals the dev default (or is `None`/empty), `raise RuntimeError('SECRET_KEY must be set in production')`.
+- **`APP_ENV=production` is the single canonical signal.** Do not also accept `PRODUCTION=true` or any alias: two accepted spellings mean a deployment can satisfy one gate and silently miss another. Concretely, if this rule accepted `PRODUCTION=true` while the cookie rule (F16) and the verification checklist read only `APP_ENV`, a deployment setting `PRODUCTION=true` with a valid key would pass the secret-key gate **with `SESSION_COOKIE_SECURE` still off** — a live vulnerability produced purely by the inconsistency. One name, checked by one helper (`is_production()`), used by F7, F16, and the 2.10 topology guard alike. Do **not** infer production from `not DEBUG` — the documented local run `python app.py` has `DEBUG=False` by default, and gating on it would block ordinary development startup.
 - Also validate that config integers are actually integers (env typo like `MAX_UPLOAD_SIZE=abc` currently raises `ValueError` at import time with a confusing traceback; wrap with clear messages).
 
-**Effort:** 30m. **Tests:** with `APP_ENV=production` and `SECRET_KEY` unset (dev default), call `create_app()` through the real factory and assert `RuntimeError`; with `APP_ENV` unset (local dev), the same default key starts successfully; a valid `SECRET_KEY` under `APP_ENV=production` also starts. Do not construct `Config(SECRET_KEY=...)` — `Config` is a class with class attributes, not a constructor; drive behavior via environment variables or `app.config` mutation after load.
+**Effort:** 30m. **Tests** — cover **every** branch this finding adds, not just the unset-key one: (a) `APP_ENV=production` + `SECRET_KEY` unset (dev default) → `RuntimeError`; (b) `APP_ENV=production` + **`SECRET_KEY=""`** (empty string — a distinct branch from unset, and the one a misconfigured secrets manager actually produces) → `RuntimeError`; (c) `APP_ENV=production` + a valid key → starts; (d) `APP_ENV` unset (local dev) + the default key → starts; (e) the integer-validation branch: `MAX_UPLOAD_SIZE=abc`, and one bad value for **each** integer setting (`PREVIEW_ROW_LIMIT`, `API_FETCH_TIMEOUT`, `API_FETCH_MAX_RESPONSE`, `FLATTEN_MAX_DEPTH`, `API_DNS_TIMEOUT`, `MAX_EXPORT_CELLS`, `APP_WORKERS`, `APP_REPLICAS`) → the documented clear error, not a raw `ValueError` traceback; (f) `PRODUCTION=true` alone is **not** honored as a production signal (guards against the two-spellings hole above). Do not construct `Config(SECRET_KEY=...)` — `Config` is a class with class attributes, not a constructor; drive behavior via environment variables or `app.config` mutation after load.
 
 ---
 
