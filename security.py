@@ -5,6 +5,7 @@ import ipaddress
 import os
 import socket
 import threading
+from typing import Any
 from urllib.parse import urlparse
 
 from flask import current_app, has_app_context, request
@@ -84,7 +85,7 @@ class ResolverBusyError(Exception):
 class _ResolverPool:
     """A fixed-size resolver pool with an admission permit per in-flight lookup."""
 
-    def __init__(self, max_workers):
+    def __init__(self, max_workers: int) -> None:
         self.pid = os.getpid()
         self.max_workers = max_workers
         # Pool size plus an equal backlog: a bounded submission queue. Beyond this
@@ -97,7 +98,7 @@ class _ResolverPool:
         self._counter_lock = threading.Lock()
         self.in_flight = 0
 
-    def submit(self, hostname, admission_timeout):
+    def submit(self, hostname: str, admission_timeout: float) -> concurrent.futures.Future:
         """
         Admit and start one lookup, or raise ResolverBusyError.
 
@@ -119,10 +120,10 @@ class _ResolverPool:
         future.add_done_callback(self._on_done)
         return future
 
-    def _on_done(self, _future):
+    def _on_done(self, _future: concurrent.futures.Future) -> None:
         self._release()
 
-    def _release(self):
+    def _release(self) -> None:
         with self._counter_lock:
             self.in_flight -= 1
         self._permits.release()
@@ -132,7 +133,7 @@ _pool_lock = threading.Lock()
 _pool = None
 
 
-def get_resolver_pool(max_workers=None):
+def get_resolver_pool(max_workers: int | None = None) -> '_ResolverPool':
     """
     Return this process's resolver pool, creating it on first use.
 
@@ -153,7 +154,7 @@ def get_resolver_pool(max_workers=None):
         return _pool
 
 
-def reset_resolver_pool():
+def reset_resolver_pool() -> '_ResolverPool | None':
     """
     Drop the current pool so the next lookup builds a fresh one.
 
@@ -170,14 +171,14 @@ def reset_resolver_pool():
     return pool
 
 
-def _setting(name, default):
+def _setting(name: str, default: Any) -> Any:
     """Read a config value, falling back to the module default outside a request."""
     if has_app_context():
         return current_app.config.get(name, default)
     return default
 
 
-def resolve_hostname(hostname):
+def resolve_hostname(hostname: str) -> list[Any]:
     """
     Resolve a hostname under admission control.
 
@@ -192,7 +193,7 @@ def resolve_hostname(hostname):
     return future.result(timeout=timeout)
 
 
-def validate_url(url):
+def validate_url(url: str) -> tuple[bool, str | None]:
     """
     Validate a URL for SSRF protection.
     Resolves DNS and rejects non-global IPs.

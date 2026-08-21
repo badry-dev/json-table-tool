@@ -1655,3 +1655,90 @@ class TestRateLimitTopologyGuard:
         assert worker_count_from_start_command(['gunicorn', '--bind', ':80']) is None
         assert worker_count_from_start_command(['gunicorn', '--workers', 'x']) is None
         assert worker_count_from_start_command([]) is None
+
+
+class TestProcessResponseShape:
+    """3.1-3.3 - the refactor is behavior-preserving and additive only."""
+
+    EXISTING_KEYS = {
+        'success': bool,
+        'columns': list,
+        'preview': list,
+        'total_rows': int,
+        'csv_data': list,
+        'csv_columns': list,
+    }
+
+    def _process(self, client, **extra):
+        data = {
+            'input_method': 'paste',
+            'pasted_json': json.dumps([{'b': 2, 'a': 1}, {'a': 3, 'c': 4}]),
+            'json_path': '(root)',
+        }
+        data.update(extra)
+        return json.loads(client.post('/process', data=data).data)
+
+    def test_no_existing_key_changed_name_type_or_meaning(self, client):
+        payload = self._process(client)
+        for key, expected_type in self.EXISTING_KEYS.items():
+            assert key in payload, key
+            assert isinstance(payload[key], expected_type), key
+
+        assert payload['total_rows'] == 2
+        assert payload['columns'] == ['a', 'b', 'c']
+        assert payload['csv_columns'] == ['a', 'b', 'c']
+        assert payload['csv_data'] == [{'b': 2, 'a': 1}, {'a': 3, 'c': 4}]
+
+    def test_preview_limit_is_returned(self, client, app):
+        app.config['PREVIEW_ROW_LIMIT'] = 7
+        payload = self._process(client)
+        assert payload['preview_limit'] == 7
+
+    def test_new_keys_are_the_only_additions(self, client):
+        payload = self._process(client)
+        added = set(payload) - set(self.EXISTING_KEYS)
+        assert added == {'preview_limit', 'total_cells', 'max_export_cells'}
+
+    def test_tree_picker_handshake_is_unchanged(self, client):
+        payload = json.loads(
+            client.post(
+                '/process',
+                data={'input_method': 'paste', 'pasted_json': '{"a": [{"x": 1}]}'},
+            ).data
+        )
+        assert payload == {'needs_selection': True, 'raw_json': {'a': [{'x': 1}]}}
+
+    def test_all_error_paths_still_return_their_messages(self, client):
+        cases = [
+            ({'input_method': 'unknown'}, 'Invalid input method'),
+            ({'input_method': 'paste', 'pasted_json': ''}, 'No JSON provided'),
+            ({'input_method': 'api', 'api_url': ''}, 'No API URL provided'),
+            (
+                {'input_method': 'paste', 'pasted_json': '{"a": 1}', 'json_path': 'zz'},
+                'not found',
+            ),
+            (
+                {'input_method': 'paste', 'pasted_json': '{"a": 1}', 'json_path': 'a'},
+                'primitive value',
+            ),
+        ]
+        for data, expected in cases:
+            response = client.post('/process', data=data)
+            assert response.status_code == 400, data
+            assert expected in json.loads(response.data)['error'], data
+
+    def test_process_json_stays_small(self):
+        """3.1 - the extraction is the point; guard against it creeping back."""
+        import ast
+        import inspect
+
+        import routes
+
+        source = inspect.getsource(routes)
+        tree = ast.parse(source)
+        node = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'process_json'
+        )
+        lines = source.splitlines()[node.lineno - 1 : node.end_lineno]
+        code_lines = [ln for ln in lines if ln.strip() and not ln.strip().startswith('#')]
+        assert len(code_lines) <= 50, f'process_json is {len(code_lines)} code lines'

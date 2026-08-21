@@ -1,9 +1,16 @@
 """Data processing helpers for JSON flattening and table extraction."""
 
 import json
+from typing import Any
 
 
-def flatten_for_csv(data, parent_key='', sep='.', _depth=0, max_depth=10):
+def flatten_for_csv(
+    data: Any,
+    parent_key: str = '',
+    sep: str = '.',
+    _depth: int = 0,
+    max_depth: int = 10,
+) -> dict[str, Any]:
     """
     Flatten nested dictionaries for CSV export.
     Arrays are converted to JSON strings.
@@ -38,7 +45,7 @@ def flatten_for_csv(data, parent_key='', sep='.', _depth=0, max_depth=10):
 FORMULA_TRIGGERS = ('=', '+', '-', '@', '\t', '\r', '\n')
 
 
-def serialize_cell_value(value):
+def serialize_cell_value(value: Any) -> Any:
     """
     Reduce one cell value to the scalar an export writer can emit.
 
@@ -50,12 +57,12 @@ def serialize_cell_value(value):
     return value
 
 
-def is_formula_trigger(value):
+def is_formula_trigger(value: Any) -> bool:
     """True when a serialized value would be read as a formula by a spreadsheet."""
     return isinstance(value, str) and value.startswith(FORMULA_TRIGGERS)
 
 
-def sanitize_cell(value):
+def sanitize_cell(value: Any) -> Any:
     """
     Serialize a cell for the delimited formats (CSV/TSV) and defuse formula
     injection (CWE-1236).
@@ -72,7 +79,7 @@ def sanitize_cell(value):
     return serialized
 
 
-def flatten_rows(rows, max_depth=10):
+def flatten_rows(rows: list[Any], max_depth: int = 10) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Flatten every row and collect the column names in a single pass.
 
@@ -93,7 +100,7 @@ def flatten_rows(rows, max_depth=10):
     return flattened, sorted(columns)
 
 
-def extract_table_data(json_data, _depth=0, max_depth=10):
+def extract_table_data(json_data: Any, _depth: int = 0, max_depth: int = 10) -> list[Any]:
     """
     Extract tabular data from JSON.
     Handles arrays of objects, nested arrays, and single objects.
@@ -132,7 +139,7 @@ def extract_table_data(json_data, _depth=0, max_depth=10):
     return []
 
 
-def parse_jsonl(text):
+def parse_jsonl(text: str) -> list[Any]:
     """
     Parse JSONL (JSON Lines) text into a list of objects.
     Each non-empty line is parsed as a separate JSON value.
@@ -149,7 +156,7 @@ def parse_jsonl(text):
     return rows
 
 
-def extract_by_path(json_data, path):
+def extract_by_path(json_data: Any, path: str) -> Any:
     """
     Extract data from JSON using a dot-notation path.
     Numeric parts traverse arrays (e.g. 'data.0.orders').
@@ -176,7 +183,7 @@ def extract_by_path(json_data, path):
     return current
 
 
-def get_all_columns(data):
+def get_all_columns(data: list[Any]) -> list[str]:
     """Get all unique column names from the data, sorted alphabetically."""
     columns = set()
     for row in data:
@@ -197,7 +204,9 @@ PREVIEW_MAX_ITEMS = 20
 PREVIEW_TRUNCATION_SUFFIX = '… (truncated)'
 
 
-def _truncate_preview_value(value, max_string, max_items, depth, max_depth):
+def _truncate_preview_value(
+    value: Any, max_string: int, max_items: int, depth: int, max_depth: int
+) -> Any:
     """Return a capped copy of one nested value."""
     if isinstance(value, str):
         if len(value) > max_string:
@@ -232,11 +241,11 @@ def _truncate_preview_value(value, max_string, max_items, depth, max_depth):
 
 
 def preview_truncate(
-    row,
-    max_string=PREVIEW_MAX_STRING,
-    max_items=PREVIEW_MAX_ITEMS,
-    max_depth=10,
-):
+    row: Any,
+    max_string: int = PREVIEW_MAX_STRING,
+    max_items: int = PREVIEW_MAX_ITEMS,
+    max_depth: int = 10,
+) -> Any:
     """
     Build a capped COPY of one preview row.
 

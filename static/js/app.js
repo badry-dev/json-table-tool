@@ -27,6 +27,7 @@ let csvData = null;
 let csvColumns = null;
 let totalCells = 0;
 let maxExportCells = 0;
+let previewLimit = 25;
 let currentColumns = null;
 let currentRows = null;
 let currentTotalRows = 0;
@@ -142,6 +143,9 @@ async function submitForm(jsonPath) {
         csvColumns = data.csv_columns;
         totalCells = data.total_cells || 0;
         maxExportCells = data.max_export_cells || 0;
+        // P11: the badge used to hardcode 25, so changing PREVIEW_ROW_LIMIT gave
+        // an operator a wrong badge.
+        previewLimit = data.preview_limit || previewLimit;
         updateExcelAvailability();
 
         renderTable(data.columns, data.preview, data.total_rows);
@@ -371,11 +375,18 @@ function renderTableDOM(columns, rows, totalRows) {
 
     // Update counts
     rowCountText.textContent = `${totalRows} total rows`;
-    if (totalRows > 25) {
-        previewBadge.textContent = 'Showing first 25';
+    if (rows.length < totalRows) {
+        previewBadge.textContent = `Showing first ${rows.length}`;
+        // Sorting reorders only the rows currently in the table, while exports
+        // always contain every row -- say so rather than leaving the discrepancy
+        // invisible (P11).
+        previewBadge.title =
+            `Preview limit is ${previewLimit}. Sorting applies to the rows shown here; ` +
+            'exports always contain all rows.';
         previewBadge.classList.remove('hidden');
     } else {
         previewBadge.textContent = `Showing all ${totalRows}`;
+        previewBadge.title = '';
         previewBadge.classList.add('hidden');
     }
 }
