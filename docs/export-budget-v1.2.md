@@ -41,6 +41,7 @@ would not mask the workbook cost.
 | rows × cols | cells | delta (MiB) | absolute (MiB) |
 |---|---|---|---|
 | 15,000 × 10 | 150,000 | 73.6 | 114.3 |
+| 83,333 × 3 | 249,999 | **138.9** | 179.6 |
 | 50,000 × 3 | 150,000 | **84.3** | 125.0 |
 | 20,000 × 10 | 200,000 | 98.6 | 139.2 |
 | 2,000 × 150 | 300,000 | 137.3 | 178.0 |
@@ -71,9 +72,13 @@ intercept = 2.8 MiB
 The 274,998-cell run measured **152.2 MiB — over the 150 MiB target**, so the
 crossing is real and not an artifact of extrapolation. The budget is set at
 **250,000 cells**, roughly 8% below the crossing, which is the margin
-run-to-run variance on these measurements needs. Predicted delta at that size is
-≈ 138.6 MiB, and the measured absolute high-water mark at nearby sizes stays
-well under the 256 MiB (half of a 512 MiB container) ceiling.
+run-to-run variance on these measurements needs.
+
+That value was then measured directly rather than left as an extrapolation:
+83,333 × 3 = 249,999 cells came back at **138.9 MiB delta / 179.6 MiB absolute**
+(the fit predicted 138.6). It passes both halves of the §4 verdict — under the
+150 MiB delta target, and well under the 256 MiB absolute ceiling for a 512 MiB
+container.
 
 ## What the budget does and does not cover
 
