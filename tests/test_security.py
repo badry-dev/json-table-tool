@@ -1,6 +1,7 @@
 """Tests for security utilities."""
 
 from unittest.mock import patch
+
 from security import validate_url
 
 
@@ -72,6 +73,7 @@ class TestValidateUrl:
 
     def test_unresolvable_hostname(self):
         import socket
+
         with patch('security.socket.getaddrinfo') as mock_dns:
             mock_dns.side_effect = socket.gaierror('Name not found')
             is_valid, error = validate_url('http://nonexistent.invalid')

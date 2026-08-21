@@ -1,6 +1,7 @@
 """JSON Table Converter - Flask application factory."""
 
 from flask import Flask
+
 from config import Config
 from extensions import csrf, limiter
 from security import apply_security_headers
@@ -20,6 +21,7 @@ def create_app(config_class=Config):
 
     # Register routes
     from routes import bp
+
     app.register_blueprint(bp)
 
     return app

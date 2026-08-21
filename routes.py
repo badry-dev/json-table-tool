@@ -1,19 +1,23 @@
 """Flask route handlers."""
 
-import json
 import csv
 import io
+import json
 import logging
+
 import requests
+from flask import Blueprint, Response, current_app, jsonify, render_template, request
 from requests.auth import HTTPBasicAuth
-from flask import Blueprint, render_template, request, jsonify, Response, current_app
 
 from extensions import limiter
-from security import validate_url
 from helpers import (
-    flatten_for_csv, extract_table_data, get_all_columns, parse_jsonl,
-    extract_by_path
+    extract_by_path,
+    extract_table_data,
+    flatten_for_csv,
+    get_all_columns,
+    parse_jsonl,
 )
+from security import validate_url
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +33,7 @@ def index():
 @bp.route('/health')
 def health():
     """Health check endpoint."""
-    return jsonify({
-        'status': 'ok',
-        'version': current_app.config['APP_VERSION']
-    })
+    return jsonify({'status': 'ok', 'version': current_app.config['APP_VERSION']})
 
 
 @bp.route('/process', methods=['POST'])
@@ -53,10 +54,7 @@ def process_json():
                 return jsonify({'error': 'No file selected'}), 400
             try:
                 content = file.read().decode('utf-8')
-                if data_format == 'jsonl':
-                    json_data = parse_jsonl(content)
-                else:
-                    json_data = json.loads(content)
+                json_data = parse_jsonl(content) if data_format == 'jsonl' else json.loads(content)
             except UnicodeDecodeError:
                 return jsonify({'error': 'File must be UTF-8 encoded'}), 400
             except (json.JSONDecodeError, ValueError) as e:
@@ -123,7 +121,7 @@ def process_json():
                     params=params,
                     timeout=timeout,
                     stream=True,
-                    allow_redirects=False
+                    allow_redirects=False,
                 )
                 resp.raise_for_status()
 
@@ -131,16 +129,15 @@ def process_json():
                 for chunk in resp.iter_content(chunk_size=8192):
                     content.extend(chunk)
                     if len(content) > max_size:
-                        return jsonify({
-                            'error': f'API response exceeds maximum size '
-                                     f'({max_size // (1024 * 1024)}MB)'
-                        }), 400
+                        return jsonify(
+                            {
+                                'error': f'API response exceeds maximum size '
+                                f'({max_size // (1024 * 1024)}MB)'
+                            }
+                        ), 400
 
                 text = bytes(content).decode('utf-8')
-                if data_format == 'jsonl':
-                    json_data = parse_jsonl(text)
-                else:
-                    json_data = json.loads(text)
+                json_data = parse_jsonl(text) if data_format == 'jsonl' else json.loads(text)
 
             except requests.exceptions.Timeout:
                 return jsonify({'error': 'API request timed out'}), 400
@@ -164,15 +161,12 @@ def process_json():
             elif isinstance(selected, dict):
                 table_data = [selected]
             else:
-                return jsonify({
-                    'error': f'Path "{json_path}" is a primitive value; pick an object or array'
-                }), 400
+                return jsonify(
+                    {'error': f'Path "{json_path}" is a primitive value; pick an object or array'}
+                ), 400
         else:
             # No path chosen yet — let the client render a tree picker
-            return jsonify({
-                'needs_selection': True,
-                'raw_json': json_data
-            })
+            return jsonify({'needs_selection': True, 'raw_json': json_data})
 
         if not table_data:
             return jsonify({'error': 'Could not extract tabular data from JSON'}), 400
@@ -185,16 +179,18 @@ def process_json():
         csv_data = [flatten_for_csv(row, max_depth=max_depth) for row in table_data]
         csv_columns = get_all_columns(csv_data)
 
-        return jsonify({
-            'success': True,
-            'columns': columns,
-            'preview': preview_data,
-            'total_rows': len(table_data),
-            'csv_data': csv_data,
-            'csv_columns': csv_columns
-        })
+        return jsonify(
+            {
+                'success': True,
+                'columns': columns,
+                'preview': preview_data,
+                'total_rows': len(table_data),
+                'csv_data': csv_data,
+                'csv_columns': csv_columns,
+            }
+        )
 
-    except Exception as e:
+    except Exception:
         logger.exception('Unexpected error in process_json')
         return jsonify({'error': 'An internal error occurred'}), 500
 
@@ -233,11 +229,11 @@ def export_csv():
             mimetype='text/csv',
             headers={
                 'Content-Disposition': 'attachment; filename=exported_data.csv',
-                'Content-Type': 'text/csv; charset=utf-8'
-            }
+                'Content-Type': 'text/csv; charset=utf-8',
+            },
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception('Unexpected error in export_csv')
         return jsonify({'error': 'Export failed'}), 500
 
@@ -285,9 +281,9 @@ def export_xlsx():
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             headers={
                 'Content-Disposition': 'attachment; filename=exported_data.xlsx',
-            }
+            },
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception('Unexpected error in export_xlsx')
         return jsonify({'error': 'Export failed'}), 500
