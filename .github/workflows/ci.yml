@@ -15,10 +15,12 @@ permissions:
 #
 # github.ref alone does NOT dedupe them: a push is refs/heads/<branch> while the
 # pull_request event is refs/pull/<n>/merge, so both ran on every push to a PR
-# branch. head_ref is the source branch on a pull_request and empty on a push,
-# so this collapses the pair onto one group.
+# branch. The pair only collapses if both sides render the same bare branch
+# name: head_ref is the source branch on a pull_request and empty on a push,
+# and ref_name is the branch name without the refs/heads/ prefix (github.ref
+# would keep it and miss the match).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
