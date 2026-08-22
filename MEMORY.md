@@ -177,6 +177,7 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 
 
 ---
+
 ### 2026-08-22 — `routes.py` must never import `app.py`  (area: backend)
 
 **What:** Shared utilities go in `helpers.py` (or another leaf module), never in `app.py`. `helpers.format_size` is there for exactly this reason.

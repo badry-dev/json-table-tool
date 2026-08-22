@@ -19,8 +19,15 @@ permissions:
 # name: head_ref is the source branch on a pull_request and empty on a push,
 # and ref_name is the branch name without the refs/heads/ prefix (github.ref
 # would keep it and miss the match).
+#
+# The branch name alone is not unique across repositories, though: two pull
+# requests opened from different forks on a branch both named `feature` would
+# share a group, and cancel-in-progress would have them kill each other's
+# checks. Keying on the source repo as well keeps forks apart, and still
+# collapses the push/pull_request pair for a same-repo branch, where
+# head.repo.full_name and github.repository are the same string.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
