@@ -1047,3 +1047,21 @@ th.sort-desc::after {
 .text-muted {
     color: var(--text-secondary, #8b949e);
 }
+
+/* "Show N more" control inside the tree picker (keeps nodes past the per-level
+   cap reachable rather than merely announced). */
+.tree-more-button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 4px 0;
+    font: inherit;
+    color: var(--accent, #58a6ff);
+    cursor: pointer;
+}
+
+.tree-more-button:hover {
+    text-decoration: underline;
+}

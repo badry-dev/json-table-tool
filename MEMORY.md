@@ -109,7 +109,7 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 
 **What:** Values starting with `=`, `+`, `-`, `@`, tab, CR or LF are formula triggers (CWE-1236). CSV/TSV prefix them with a single quote; XLSX instead pins the cell's `data_type` to `'s'`, because openpyxl serializes a leading `=` as a *formula cell* and Excel then runs it without the CSV warning. JSONL and Markdown exports are deliberately exempt.
 **Why:** The tool's whole job is turning untrusted API/file JSON into spreadsheets, so an attacker who controls a cell controls the exported file's formulas. The exemptions are not oversights: JSON carries types and nothing evaluates it, so a quote prefix would corrupt data while protecting nothing; Markdown does not evaluate `=` either, but an unescaped pipe or newline breaks the table, so it gets Markdown-specific escaping.
-**How to apply:** Any new **spreadsheet-compatible** export must route cells through `helpers.sanitize_cell` (or pin the data type, for typed formats). Any new **lossless or text** format must not. There are four sanitized paths today — two server routes plus the client CSV and TSV builders — and `tests/js/test_export_sanitize.mjs` exists so none of them can regress silently.
+**How to apply:** Any new **spreadsheet-compatible** export must route cells through `helpers.sanitize_cell` (or pin the data type, for typed formats). Any new **non-spreadsheet** format (JSONL, Markdown, ...) must not. There are four sanitized paths today — two server routes plus the client CSV and TSV builders — and `tests/js/test_export_sanitize.mjs` exists so none of them can regress silently.
 
 ### 2026-08-21 — The API-fetch failure log is a fixed string  (area: security)
 

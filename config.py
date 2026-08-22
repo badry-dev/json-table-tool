@@ -48,9 +48,16 @@ def env_int(name, default):
 
 
 def env_int_set(name, default):
-    """Read a comma-separated integer list (e.g. an allowlist of ports)."""
+    """
+    Read a comma-separated integer list (e.g. an allowlist of ports).
+
+    Only an UNSET variable selects the default. An explicitly empty value yields
+    an empty set, which is how an operator disables a list-based check -- folding
+    the two together silently restored the default and made the documented
+    escape hatch a no-op.
+    """
     raw = os.environ.get(name)
-    if raw is None or raw.strip() == '':
+    if raw is None:
         raw = default
     try:
         return frozenset(int(part.strip()) for part in raw.split(',') if part.strip())

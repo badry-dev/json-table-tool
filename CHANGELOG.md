@@ -81,7 +81,10 @@ No response key changed name, type or meaning; `/process` only gained keys.
 - **Row filter**: case-insensitive substring across all values.
 - **JSONL and Markdown exports.** Neither is formula-sanitized: JSON has types
   and nothing evaluates it, and a leading `=` is inert in Markdown — Markdown
-  gets pipe/newline escaping instead.
+  gets pipe/newline escaping instead. Both write the same flattened columns the
+  table shows (nested objects as dotted keys, nested arrays as JSON strings),
+  because the unflattened rows are never sent to the browser; see
+  "Known limitations".
 - **Column visibility toggle** and **deep-linkable path selection**
   (`#path=users.0.orders`).
 - `/process` returns `preview_limit`, `total_cells` and `max_export_cells`, so
@@ -103,6 +106,19 @@ No response key changed name, type or meaning; `/process` only gained keys.
 
 - `find_candidate_arrays` and its four tests — dead code from the old candidates
   handshake the JSON tree picker replaced (P10/D2).
+
+### Known limitations
+
+- **JSONL export is not a faithful copy of the input document.** Roadmap 4.3
+  called it "lossless — original values". It writes values verbatim (no formula
+  prefixing, which was the security-relevant half of that decision), but over
+  the server's *flattened* projection: `{"tags": [1, 2]}` exports as
+  `"tags": "[1, 2]"`, and `{"meta": {"role": "x"}}` as `"meta.role": "x"`.
+  Only `csv_data` (flattened) reaches the browser for the full dataset —
+  `preview` is truncated and capped at `preview_limit` rows — so a
+  round-tripping export would mean shipping the original rows alongside the
+  flattened ones, doubling the payload and client memory that P2 and P12 exist
+  to reduce. Flagged for a maintainer decision rather than resolved either way.
 
 ### Not included
 

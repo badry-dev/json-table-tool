@@ -111,7 +111,7 @@ python -m pytest tests/ -v
 - Apply `@limiter.limit(lambda: current_app.config.get('RATE_LIMIT_...'))` on any new mutating route.
 - Read config via `current_app.config['KEY']`, not by re-importing `Config` at request time.
 - For new auth methods on the API tab: add a select option in `index.html`, a `data-auth="..."` fieldset, the JS visibility branch in `app.js`, and the conditional in `routes.py`.
-- For new exports: add the entry to the export dropdown, the handler in `app.js`, optionally a server route in `routes.py`. Pin any new dependency. **Decide the sanitization policy explicitly**: spreadsheet-compatible formats go through `sanitize_cell`; lossless or text formats (JSONL, Markdown) must not.
+- For new exports: add the entry to the export dropdown, the handler in `app.js`, optionally a server route in `routes.py`. Pin any new dependency. **Decide the sanitization policy explicitly**: spreadsheet-compatible formats go through `sanitize_cell`; non-spreadsheet formats (JSONL, Markdown) must not.
 - Add or update tests under `tests/` for any backend behavior change. Class-style grouping (`class TestXxx:`) is the existing pattern.
 - Preserve the CSP. If new third-party CSS/fonts are needed, edit `apply_security_headers` deliberately.
 

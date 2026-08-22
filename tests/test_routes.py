@@ -16,6 +16,7 @@ from flask import Response, request
 import config as config_module
 from app import check_rate_limit_topology, create_app, worker_count_from_start_command
 from extensions import client_ip_key
+from security import validate_url
 
 
 class TestIndexRoute:
@@ -1855,3 +1856,65 @@ class TestCsrfErrorIsJson:
             )
             assert response.status_code == 400, url
             assert response.content_type.startswith('application/json'), url
+
+
+class TestPortAllowlistEnvParsing:
+    """
+    Codex review: an explicitly empty API_ALLOWED_PORTS must disable the check.
+
+    The earlier test set app.config directly, so it never exercised the env
+    parsing where unset and empty were folded together.
+    """
+
+    def test_empty_string_disables_the_check(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS='')
+        assert len(cfg.API_ALLOWED_PORTS) == 0
+
+    def test_whitespace_only_disables_the_check(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS='   ')
+        assert len(cfg.API_ALLOWED_PORTS) == 0
+
+    def test_unset_still_selects_the_default(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS=None)
+        assert sorted(cfg.API_ALLOWED_PORTS) == [80, 443, 8443]
+
+    def test_empty_allowlist_from_env_lets_any_port_through(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS='')
+        app = create_app(cfg)
+        with app.app_context(), patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = [(2, 1, 6, '', ('93.184.216.34', 0))]
+            assert validate_url('http://public.example.com:22/x')[0] is True
+
+
+class TestReadinessStorageCheck:
+    """
+    Codex review: limits' storages report an unreachable backend by RETURNING
+    False (RedisStorage.check() swallows the error), not only by raising.
+    """
+
+    def test_false_return_marks_storage_unavailable(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.return_value = False
+            response = client.get('/health/ready')
+
+        assert response.status_code == 503
+        data = json.loads(response.data)
+        assert data['status'] == 'degraded'
+        assert data['checks']['rate_limit_storage'] == 'unavailable'
+
+    def test_raised_exception_still_marks_storage_unavailable(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.side_effect = RuntimeError('redis down')
+            response = client.get('/health/ready')
+
+        assert response.status_code == 503
+        assert json.loads(response.data)['checks']['rate_limit_storage'] == 'unavailable'
+        assert 'redis down' not in response.get_data(as_text=True)
+
+    def test_true_return_is_healthy(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.return_value = True
+            response = client.get('/health/ready')
+
+        assert response.status_code == 200
+        assert json.loads(response.data)['checks']['rate_limit_storage'] == 'ok'

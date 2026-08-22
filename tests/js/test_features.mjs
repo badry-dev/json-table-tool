@@ -28,7 +28,7 @@ const {
 let checks = 0;
 const check = (fn) => { fn(); checks += 1; };
 
-// --- 4.3 JSONL: lossless, NOT formula-sanitized ---------------------------
+// --- 4.3 JSONL: values unescaped, NOT formula-sanitized -------------------
 check(() => {
     const rows = [{ a: '=SUM(A1)', b: 1 }, { a: '@cmd', b: null }];
     const lines = buildJsonlChunks(['a', 'b'], rows).join('').trim().split('\n');
@@ -37,6 +37,7 @@ check(() => {
     const first = JSON.parse(lines[0]);
     // The spreadsheet sanitizer must NOT have touched this: JSON has types,
     // nothing evaluates it, and a quote prefix would corrupt the value.
+    // (Values are verbatim; the COLUMN SHAPE is the server's flattened one.)
     assert.equal(first.a, '=SUM(A1)');
     assert.notEqual(first.a, sanitizeCell('=SUM(A1)'));
     assert.equal(first.b, 1);
@@ -124,6 +125,25 @@ check(() => {
 
     context.window.location.hash = '#path=a.b%20c';
     assert.equal(readPathFromHash(), 'a.b c', 'percent-encoding is decoded');
+});
+
+// --- Codex review follow-ups ---------------------------------------------
+
+// Finding 4: nodes past the per-level cap must stay reachable.
+check(() => {
+    // The batching entry points exist, so the overflow notice can become a
+    // control rather than a dead end.
+    assert.equal(typeof context.populateNextBatch, 'function');
+    assert.equal(typeof context.populateChildren, 'function');
+
+    // childEntries must enumerate EVERY child (500 > the 200 per-level render
+    // cap); the cap belongs to the renderer, not to the enumeration, or a deep
+    // link could never resolve past it.
+    const wide = {};
+    for (let i = 0; i < 500; i += 1) wide[`k${i}`] = i;
+    const entries = context.childEntries(wide, '(root)');
+    assert.equal(entries.length, 500);
+    assert.equal(entries[499].path, 'k499');
 });
 
 console.log(`ok - ${checks} client feature assertions passed`);

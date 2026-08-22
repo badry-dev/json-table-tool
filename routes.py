@@ -148,12 +148,16 @@ def health_ready():
 
     storage_uri = current_app.config.get('RATELIMIT_STORAGE_URI', 'memory://')
     try:
-        limiter.storage.check()
-        checks['rate_limit_storage'] = 'ok'
+        # limits' storages report an unreachable backend by RETURNING False --
+        # RedisStorage.check() swallows the connection error and returns False --
+        # so discarding the result would mark a dead Redis as healthy and keep a
+        # load balancer sending traffic to an instance that cannot rate-limit.
+        storage_healthy = bool(limiter.storage.check())
     except Exception:
         # The URI is config, not payload, but keep the reason out of the body.
         logger.warning('Rate-limit storage check failed')
-        checks['rate_limit_storage'] = 'unavailable'
+        storage_healthy = False
+    checks['rate_limit_storage'] = 'ok' if storage_healthy else 'unavailable'
 
     checks['xlsx_writer'] = 'ok' if Workbook is not None else 'unavailable'
 

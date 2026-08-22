@@ -411,7 +411,8 @@ basic-auth passwords are POSTed from the browser to this app.
 - After conversion, click **"Export"** to see format options:
   - **CSV** — Comma-separated values (generated instantly in your browser)
   - **TSV** — Tab-separated values (generated instantly in your browser)
-    - **JSONL** — one JSON object per line, lossless (no formula escaping applied)
+    - **JSONL** — one JSON object per line, over the same flattened columns the
+      table shows, with values unescaped (no formula prefixing applied)
   - **Markdown** — a Markdown table, with Markdown-specific escaping
   - **Excel** — `.xlsx` file via server-side generation
 - All formats export ALL rows (not just the preview)
@@ -470,7 +471,10 @@ basic-auth passwords are POSTed from the browser to this app.
   X-Content-Type-Options, Referrer-Policy, and `Cache-Control: no-store` on data responses
 - **Formula-injection defense**: values starting with `=`, `+`, `-`, `@`, tab, CR or LF
   are neutralized in CSV, TSV and Excel exports, so an untrusted value cannot become a
-  live formula when the file is opened. JSONL and Markdown stay lossless by design
+  live formula when the file is opened. JSONL and Markdown are deliberately left
+  unescaped: JSON carries types and nothing evaluates it, and a leading `=` is
+  inert in Markdown, so prefixing there would corrupt values while protecting
+  nothing
 - **Startup gates**: with `APP_ENV=production`, the app refuses to start on the
   development `SECRET_KEY` or with a rate-limit topology it cannot enforce
 - **HTTPS**: Render provides free SSL/TLS; use Nginx/Let's Encrypt for self-hosted.

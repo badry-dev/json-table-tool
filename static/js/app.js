@@ -279,28 +279,58 @@ function appendTreeNotice(container, text) {
     container.appendChild(notice);
 }
 
-function populateChildren(children) {
-    if (children.dataset.loaded === 'true') return;
-    children.dataset.loaded = 'true';
+// The per-level cap keeps the first paint cheap, but it must never make a node
+// unreachable: without this control, a key past the 200th could be selected
+// neither by clicking nor by a #path= deep link.
+function appendTreeMoreButton(container, remaining) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.classList.add('tree-more', 'tree-more-button');
+    button.textContent = `Show ${Math.min(remaining, TREE_MAX_CHILDREN)} more of ${remaining}`;
+    button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        populateNextBatch(container);
+    });
+    container.appendChild(button);
+}
 
+function clearTreeOverflowControl(container) {
+    const existing = container.querySelector(':scope > .tree-more');
+    if (existing) existing.remove();
+}
+
+// Append the next batch of children. Returns the number now materialized.
+function populateNextBatch(children) {
     const held = treeNodeValues.get(children);
-    if (!held) return;
+    if (!held) return 0;
 
     const entries = childEntries(held.value, held.path);
-    const shown = Math.min(entries.length, TREE_MAX_CHILDREN);
+    let built = Number(children.dataset.built || 0);
+    if (built >= entries.length) return built;
 
-    for (let i = 0; i < shown; i++) {
+    clearTreeOverflowControl(children);
+
+    const target = Math.min(entries.length, built + TREE_MAX_CHILDREN);
+    while (built < target && treeNodesBuilt < TREE_MAX_NODES) {
+        const entry = entries[built];
+        children.appendChild(buildTreeNode(entry.value, entry.path, entry.label, false));
+        built += 1;
+    }
+    children.dataset.built = String(built);
+
+    if (built < entries.length) {
         if (treeNodesBuilt >= TREE_MAX_NODES) {
             appendTreeNotice(children, 'Tree size limit reached — narrow the selection above.');
-            return;
+        } else {
+            appendTreeMoreButton(children, entries.length - built);
         }
-        const entry = entries[i];
-        children.appendChild(buildTreeNode(entry.value, entry.path, entry.label, false));
     }
+    return built;
+}
 
-    if (entries.length > shown) {
-        appendTreeNotice(children, `… and ${entries.length - shown} more`);
-    }
+// First batch only; safe to call every time a node is toggled open.
+function populateChildren(children) {
+    if (children.dataset.built === undefined) populateNextBatch(children);
 }
 
 function toggleNode(node, toggle) {
@@ -357,14 +387,25 @@ function expandTreeToPath(path) {
 
     let current = '';
     let target = null;
+    let container = treeContainer.querySelector(':scope > .tree-node > .tree-children');
+
     for (const segment of path.split('.')) {
         current = current ? `${current}.${segment}` : segment;
-        const row = findTreeRowByPath(current);
-        // Missing means the path does not exist, or the node sits past a lazy
-        // cap. Either way this is a hint, not a command -- leave the picker open.
+
+        // The target may sit past the per-level cap, so keep materializing
+        // batches at this level until it appears or the level is exhausted.
+        let row = findTreeRowByPath(current);
+        while (!row && container) {
+            const before = Number(container.dataset.built || 0);
+            if (populateNextBatch(container) === before) break;
+            row = findTreeRowByPath(current);
+        }
+        // Still missing means the path genuinely does not exist. This is a hint,
+        // not a command -- leave the picker open rather than erroring.
         if (!row) return false;
 
         const children = row.parentElement.querySelector(':scope > .tree-children');
+        container = children;
         if (children) {
             populateChildren(children);
             children.classList.remove('hidden');
@@ -994,11 +1035,17 @@ function buildDelimited(columns, data, delimiter) {
 
 // --- 4.3 JSONL export -----------------------------------------------------
 //
-// Lossless: rows go out exactly as they arrived, with NO formula sanitization.
-// F1's sanitizer exists because CSV/TSV/XLSX have no type channel and a
-// spreadsheet re-interprets a leading '=' as a formula; JSON has types, nothing
-// evaluates it, and prefixing values here would corrupt the data instead of
-// protecting anything.
+// Values go out UNESCAPED -- no formula sanitization. F1's sanitizer exists
+// because CSV/TSV/XLSX have no type channel and a spreadsheet re-interprets a
+// leading '=' as a formula; JSON has types, nothing evaluates it, and prefixing
+// values here would corrupt the data instead of protecting anything.
+//
+// NOT a faithful copy of the input document: rows come from csv_data, which the
+// server already flattened, so nested objects appear as dotted keys and nested
+// arrays as JSON strings. The unflattened rows are never sent to the browser --
+// `preview` is both truncated and capped at preview_limit rows -- so a
+// round-tripping JSONL export would require shipping the original rows too,
+// which is exactly the payload/memory cost P2 and P12 set out to avoid.
 function buildJsonlChunks(columns, data) {
     const chunks = [];
     let pending = '';
