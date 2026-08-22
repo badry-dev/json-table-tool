@@ -146,4 +146,24 @@ check(() => {
     assert.equal(entries[499].path, 'k499');
 });
 
+// The deep-link feature has two halves; writePathToHash is the one that runs
+// when a user confirms a selection. It encodes through URLSearchParams, so a
+// round trip is what proves the halves agree.
+check(() => {
+    const { writePathToHash } = context;
+    assert.equal(typeof writePathToHash, 'function');
+
+    for (const path of [
+        'users.0.orders',
+        '(root)',
+        'a.b c',
+        'weird&key=value',
+        'key#with+chars',
+        'plain',
+    ]) {
+        writePathToHash(path);
+        assert.equal(readPathFromHash(), path, `round trip failed for ${path}`);
+    }
+});
+
 console.log(`ok - ${checks} client feature assertions passed`);

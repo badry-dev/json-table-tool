@@ -113,7 +113,10 @@ git push -u origin main
    - **Runtime**: `Python 3`
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `gunicorn "app:create_app()" --bind 0.0.0.0:$PORT --workers "$WEB_CONCURRENCY" --timeout 60`
-   - **Environment**: `APP_ENV=production`, `WEB_CONCURRENCY=1`, `APP_REPLICAS=1` (see [Deployment topology](#deployment-topology-and-rate-limiting))
+   - **Environment**: `SECRET_KEY` (click *Generate* — the app **refuses to start**
+     under `APP_ENV=production` with the development default), `APP_ENV=production`,
+     `WEB_CONCURRENCY=1`, `APP_REPLICAS=1`
+     (see [Deployment topology](#deployment-topology-and-rate-limiting))
 4. Select **Free** plan
 5. Click **"Create Web Service"**
 
@@ -411,8 +414,8 @@ basic-auth passwords are POSTed from the browser to this app.
 - After conversion, click **"Export"** to see format options:
   - **CSV** — Comma-separated values (generated instantly in your browser)
   - **TSV** — Tab-separated values (generated instantly in your browser)
-    - **JSONL** — one JSON object per line, over the same flattened columns the
-      table shows, with values unescaped (no formula prefixing applied)
+  - **JSONL** — one JSON object per line, over the same flattened columns the
+    table shows, with values unescaped (no formula prefixing applied)
   - **Markdown** — a Markdown table, with Markdown-specific escaping
   - **Excel** — `.xlsx` file via server-side generation
 - All formats export ALL rows (not just the preview)

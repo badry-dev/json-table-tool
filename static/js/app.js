@@ -482,10 +482,14 @@ function setTableData(data) {
     viewMode = 'preview';
     loadedRowCount = previewRows.length;
     hiddenColumns = new Set();
+    renderedColumnSignature = null;
     filterText = '';
     sortColumn = null;
     sortDirection = 'asc';
     if (rowFilterInput) rowFilterInput.value = '';
+    // Otherwise the "rendering stops at N rows" banner from a previous, larger
+    // dataset stays up and describes data that is no longer on screen.
+    showRowWarning('');
     renderTable();
 }
 
@@ -625,12 +629,14 @@ function updateCounts(loadedCount, shownCount) {
 
 function updateLoadControls() {
     const total = currentTotalRows;
-    const moreAvailable = loadedRowCount < total;
+    // Past MAX_DOM_ROWS loadRows() clamps, so further clicks would re-render the
+    // same rows and the buttons would look broken.
+    const moreAvailable = loadedRowCount < total && loadedRowCount < MAX_DOM_ROWS;
     if (loadMoreBtn) {
         loadMoreBtn.disabled = !moreAvailable;
         loadMoreBtn.textContent = moreAvailable
             ? `Load next ${Math.min(LOAD_MORE_STEP, total - loadedRowCount)}`
-            : 'All rows loaded';
+            : (loadedRowCount >= MAX_DOM_ROWS ? 'Render limit reached' : 'All rows loaded');
     }
     if (loadAllBtn) loadAllBtn.disabled = !moreAvailable;
 }
@@ -670,21 +676,46 @@ if (loadAllBtn) {
     loadAllBtn.addEventListener('click', () => loadRows(Number.MAX_SAFE_INTEGER));
 }
 
+const FILTER_DEBOUNCE_MS = 150;
+let filterDebounce = null;
+
 if (rowFilterInput) {
     rowFilterInput.addEventListener('input', () => {
-        filterText = rowFilterInput.value;
-        renderTable();
+        // renderTable() re-filters, re-sorts and rebuilds every cell, so running
+        // it per keystroke blocks the main thread on a fully loaded dataset.
+        clearTimeout(filterDebounce);
+        filterDebounce = setTimeout(() => {
+            filterText = rowFilterInput.value;
+            renderTable();
+        }, FILTER_DEBOUNCE_MS);
     });
 }
 
 // --- Column visibility (4.4) ----------------------------------------------
+let renderedColumnSignature = null;
+
 function renderColumnToggles() {
     if (!columnsDropdown) return;
+
+    const columns = baseColumns();
+    const signature = JSON.stringify(columns);
+    if (signature === renderedColumnSignature) {
+        // Same columns: only the checked state can have changed. Rebuilding here
+        // would destroy the checkbox a keyboard user just activated and drop
+        // focus to document.body.
+        columnsDropdown.querySelectorAll('input[type=checkbox]').forEach(box => {
+            box.checked = !hiddenColumns.has(box.dataset.column);
+        });
+        return;
+    }
+    renderedColumnSignature = signature;
+
     columnsDropdown.innerHTML = '';
-    baseColumns().forEach(col => {
+    columns.forEach(col => {
         const label = document.createElement('label');
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
+        checkbox.dataset.column = col;
         checkbox.checked = !hiddenColumns.has(col);
         checkbox.addEventListener('change', () => {
             if (checkbox.checked) {
@@ -851,8 +882,12 @@ function escapeHtml(text) {
 
 // P3/D6: tell the user Excel is out of range before they click, rather than
 // after a 400. CSV/TSV are streamed and uncapped, so there is always a way out.
+function isExcelBlocked(cells, limit) {
+    return limit > 0 && cells > limit;
+}
+
 function excelExportBlocked() {
-    return maxExportCells > 0 && totalCells > maxExportCells;
+    return isExcelBlocked(totalCells, maxExportCells);
 }
 
 function updateExcelAvailability() {
@@ -974,9 +1009,7 @@ document.querySelectorAll('.export-dropdown-item').forEach(item => {
 
 // Spreadsheet formula triggers (OWASP). Must stay in sync with
 // helpers.FORMULA_TRIGGERS on the server.
-function formulaTriggers() {
-    return ['=', '+', '-', '@', '\t', '\r', '\n'];
-}
+const FORMULA_TRIGGERS = ['=', '+', '-', '@', '\t', '\r', '\n'];
 
 // Reduce a cell to the scalar a writer emits. Containers become their JSON text.
 function serializeCellValue(value) {
@@ -991,7 +1024,7 @@ function serializeCellValue(value) {
 // deliberately NOT routed through here.
 function sanitizeCell(value) {
     const serialized = serializeCellValue(value);
-    if (typeof serialized === 'string' && formulaTriggers().some(t => serialized.startsWith(t))) {
+    if (typeof serialized === 'string' && FORMULA_TRIGGERS.some(t => serialized.startsWith(t))) {
         return "'" + serialized;
     }
     return serialized;

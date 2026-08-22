@@ -20,6 +20,7 @@ from openpyxl import Workbook
 from requests.auth import HTTPBasicAuth
 from werkzeug.exceptions import HTTPException
 
+from app import _format_size
 from config import DEFAULT_MAX_EXPORT_CELLS
 from extensions import limiter
 from helpers import (
@@ -159,7 +160,9 @@ def health_ready():
         storage_healthy = False
     checks['rate_limit_storage'] = 'ok' if storage_healthy else 'unavailable'
 
-    checks['xlsx_writer'] = 'ok' if Workbook is not None else 'unavailable'
+    # No xlsx_writer check: openpyxl is imported at module scope (task 3.4), so a
+    # missing dependency stops routes.py from importing at all and this handler
+    # could never run to report it. A check that cannot fail is noise.
 
     ready = all(value == 'ok' for value in checks.values())
     payload = _health_payload(
@@ -280,7 +283,13 @@ def _load_from_api(data_format):
         # SSRF mitigated by: pre-request DNS validation + disabled redirects.
         # Residual DNS rebinding risk is minimal (requires attacker-controlled
         # DNS with sub-millisecond TTL between our check and requests' connect).
-        resp = requests.get(
+        # Context-managed: with stream=True the socket stays open until the body
+        # is consumed or the response is closed, and the size-limit path below
+        # returns with the body only partly read. Without this the connection is
+        # never returned to the pool and leaks until garbage collection -- which
+        # any caller can trigger repeatedly by pointing /process at a large
+        # endpoint.
+        with requests.get(
             api_url,
             headers=headers,
             auth=auth,
@@ -288,28 +297,27 @@ def _load_from_api(data_format):
             timeout=timeout,
             stream=True,
             allow_redirects=False,
-        )
-        resp.raise_for_status()
+        ) as resp:
+            resp.raise_for_status()
 
-        content = bytearray()
-        for chunk in resp.iter_content(chunk_size=8192):
-            content.extend(chunk)
-            if len(content) > max_size:
-                return None, (
-                    jsonify(
-                        {
-                            'error': f'API response exceeds maximum size '
-                            f'({max_size // (1024 * 1024)}MB)'
-                        }
-                    ),
-                    400,
-                )
+            content = bytearray()
+            for chunk in resp.iter_content(chunk_size=8192):
+                content.extend(chunk)
+                if len(content) > max_size:
+                    return None, (
+                        jsonify(
+                            {
+                                'error': f'API response exceeds maximum size ({_format_size(max_size)})'
+                            }
+                        ),
+                        400,
+                    )
 
-        # bytearray decodes directly; bytes(content) made a second full copy of
-        # the response body at peak (P12). Parsing, flattening and jsonify still
-        # materialize the dataset -- this removes one copy, it does not make the
-        # pipeline low-memory.
-        return _parse_payload(content.decode('utf-8'), data_format), None
+            # bytearray decodes directly; bytes(content) made a second full copy
+            # of the response body at peak (P12). Parsing, flattening and jsonify
+            # still materialize the dataset -- this removes one copy, it does not
+            # make the pipeline low-memory.
+            return _parse_payload(content.decode('utf-8'), data_format), None
 
     except requests.exceptions.Timeout:
         return None, (jsonify({'error': 'API request timed out'}), 400)

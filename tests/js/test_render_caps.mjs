@@ -114,6 +114,30 @@ check(() => {
 });
 
 // --- D6: the Excel entry is gated on the advertised budget ----------------
+//
+// The rule lives in the pure isExcelBlocked(cells, limit) so both directions can
+// be asserted: the module-level totalCells/maxExportCells are `let` bindings,
+// which vm.runInContext keeps in script scope rather than exposing on the
+// context, so a test cannot drive them.
+check(() => {
+    const { isExcelBlocked } = context;
+    assert.equal(typeof isExcelBlocked, 'function');
+
+    // Over the limit -> blocked. This is the case the guard exists for.
+    assert.equal(isExcelBlocked(250001, 250000), true);
+    assert.equal(isExcelBlocked(1_000_000, 250000), true);
+
+    // At or under the limit -> allowed.
+    assert.equal(isExcelBlocked(250000, 250000), false);
+    assert.equal(isExcelBlocked(1, 250000), false);
+
+    // limit 0 disables the guard entirely, however large the dataset.
+    assert.equal(isExcelBlocked(10_000_000, 0), false);
+
+    // Nothing loaded yet.
+    assert.equal(isExcelBlocked(0, 250000), false);
+});
+
 check(() => {
     assert.equal(typeof excelExportBlocked, 'function');
     assert.equal(excelExportBlocked(), false, 'no data loaded means nothing to block');

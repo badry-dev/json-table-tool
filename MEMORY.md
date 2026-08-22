@@ -31,7 +31,7 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 
 **What:** The app must never persist user-submitted JSON to disk, database, or any external system. The only writes are stdout logs (and those deliberately omit payloads).
 **Why:** Designed as an internal tool for handling potentially sensitive payloads (API responses, exports). The Render free tier deliberately has no persistent disk to enforce this physically.
-**How to apply:** Reject any change that adds a DB driver, file write of payload bytes, third-party analytics, or request-body logging. `logger.warning("API request failed: %s", e)` is fine; `logger.warning("payload was: %s", body)` is not.
+**How to apply:** Reject any change that adds a DB driver, file write of payload bytes, third-party analytics, or request-body logging. Log **fixed strings**: `logger.warning('API request failed')` is fine; interpolating the payload, the URL, or the exception is not — `requests`' exception text embeds the full URL, which can carry a token (see the 2026-08-21 log-hygiene entry).
 
 ### 2026-05-12 — Gunicorn must call the factory, not a module-level `app`  (area: deploy)
 

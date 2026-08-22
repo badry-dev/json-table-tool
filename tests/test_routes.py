@@ -252,6 +252,7 @@ class TestApiFetch:
         content = json.dumps(json_data).encode()
         mock_resp.iter_content.return_value = [content]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         return mock_resp
 
     @patch('routes.requests.get')
@@ -298,6 +299,7 @@ class TestApiFetch:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'<html>not json</html>']
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = client.post(
@@ -316,6 +318,7 @@ class TestApiFetch:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'x' * 200]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = client.post(
@@ -348,6 +351,7 @@ class TestApiFetch:
         content = b'{"id": 1, "name": "Alice"}\n{"id": 2, "name": "Bob"}'
         mock_resp.iter_content.return_value = [content]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = client.post(
@@ -662,6 +666,7 @@ class TestApiFetchJsonlErrors:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'{"a": 1}\n{bad json}\n']
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         with caplog.at_level(logging.DEBUG):
@@ -739,6 +744,7 @@ class TestOutboundHeaderAllowlist:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'[{"id": 1}]']
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = self._fetch(client, '  x-API-kEy  ')
@@ -755,6 +761,7 @@ class TestOutboundHeaderAllowlist:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'[{"id": 1}]']
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = self._fetch(client, 'X-API-Key')
@@ -908,6 +915,7 @@ class TestRecursionDepth:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [self._deep_json(1500).encode()]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = client.post(
@@ -1520,6 +1528,7 @@ class TestApiFetchDecodesWithoutAnExtraCopy:
             b'"}]',
         ]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
         response = client.post(
@@ -1767,7 +1776,9 @@ class TestHealthSplit:
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data['status'] == 'ok'
-        assert data['checks'] == {'rate_limit_storage': 'ok', 'xlsx_writer': 'ok'}
+        # No xlsx_writer entry: openpyxl imports at module scope, so a missing
+        # dependency would stop routes.py loading rather than surface here.
+        assert data['checks'] == {'rate_limit_storage': 'ok'}
         assert data['rate_limit_storage_backend'] == 'memory'
 
     def test_ready_returns_503_when_a_dependency_is_down(self, client):
@@ -1815,11 +1826,25 @@ class TestExportDropdownMarkup:
         assert app.config['APP_VERSION'] in html
 
     def test_no_inline_script_or_style(self, client):
-        """CSP has no unsafe-inline, so an inline handler would simply not run."""
+        """
+        CSP has no unsafe-inline, so an inline handler would simply not run.
+
+        `'<script>' not in html` was too weak: it misses `<script type="...">`,
+        `<script >` and any attribute-carrying inline block. Match every script
+        tag and require each one to be an external src, and catch on* handlers
+        generally rather than onclick alone.
+        """
         html = client.get('/').data.decode('utf-8')
-        assert '<script>' not in html
-        assert 'onclick=' not in html
-        assert '<style' not in html
+
+        script_tags = re.findall(r'<script\b[^>]*>', html, flags=re.IGNORECASE)
+        assert script_tags, 'the page should still load its external bundle'
+        for tag in script_tags:
+            assert re.search(r'\bsrc\s*=', tag, flags=re.IGNORECASE), f'inline script: {tag}'
+
+        # No inline event handlers of any name, and no style block or attribute.
+        assert not re.search(r'\son[a-z]+\s*=', html, flags=re.IGNORECASE)
+        assert not re.search(r'<style\b', html, flags=re.IGNORECASE)
+        assert not re.search(r'\sstyle\s*=', html, flags=re.IGNORECASE)
 
     def test_table_toolbar_controls_exist(self, client):
         html = client.get('/').data.decode('utf-8')
@@ -1918,3 +1943,106 @@ class TestReadinessStorageCheck:
 
         assert response.status_code == 200
         assert json.loads(response.data)['checks']['rate_limit_storage'] == 'ok'
+
+
+class TestApiFetchClosesTheResponse:
+    """
+    CodeRabbit review: with stream=True the socket stays open until the body is
+    consumed or the response is closed, and the size-limit path returns with the
+    body only partly read.
+    """
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_response_is_closed_on_the_size_limit_path(self, mock_validate, mock_get, client, app):
+        app.config['API_FETCH_MAX_RESPONSE'] = 100
+        mock_validate.return_value = (True, None)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # More chunks than the cap allows, so the loop bails out mid-body.
+        mock_resp.iter_content.return_value = [b'x' * 80] * 10
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        response = client.post(
+            '/process',
+            data={'input_method': 'api', 'api_url': 'https://api.example.com/data'},
+        )
+
+        assert response.status_code == 400
+        assert 'exceeds maximum size' in json.loads(response.data)['error']
+        mock_resp.__exit__.assert_called()
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_response_is_closed_on_the_success_path(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'[{"a": 1}]']
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'json_path': '(root)',
+            },
+        )
+        mock_resp.__exit__.assert_called()
+
+
+class TestSizeMessageFormatting:
+    """CodeRabbit review: a sub-MiB limit reported "0MB"."""
+
+    def test_sub_megabyte_limit_is_reported_in_kb(self, fresh_config):
+        cfg = fresh_config(MAX_UPLOAD_SIZE=str(512 * 1024))
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': 'x' * (1024 * 1024)},
+        )
+        assert response.status_code == 413
+        assert json.loads(response.data)['error'] == 'Request too large (max 512KB)'
+
+    def test_megabyte_limit_still_reads_in_mb(self, fresh_config):
+        cfg = fresh_config(MAX_UPLOAD_SIZE=str(2 * 1024 * 1024))
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': 'x' * (3 * 1024 * 1024)},
+        )
+        assert json.loads(response.data)['error'] == 'Request too large (max 2MB)'
+
+    def test_tiny_limit_is_reported_in_bytes(self):
+        from app import _format_size
+
+        assert _format_size(500) == '500 bytes'
+        assert _format_size(0) == '0 bytes'
+
+
+class TestDnsWorkerCountValidation:
+    """CodeRabbit review: ThreadPoolExecutor rejects max_workers <= 0."""
+
+    def test_zero_workers_is_rejected_at_import(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_DNS_MAX_WORKERS must be >= 1'):
+            fresh_config(API_DNS_MAX_WORKERS='0')
+        fresh_config(API_DNS_MAX_WORKERS=None)
+
+    def test_negative_workers_is_rejected_at_import(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_DNS_MAX_WORKERS must be >= 1'):
+            fresh_config(API_DNS_MAX_WORKERS='-2')
+        fresh_config(API_DNS_MAX_WORKERS=None)
+
+    def test_positive_workers_is_accepted(self, fresh_config):
+        cfg = fresh_config(API_DNS_MAX_WORKERS='8')
+        assert cfg.API_DNS_MAX_WORKERS == 8

@@ -5,6 +5,17 @@ on:
     branches: ["**"]
   pull_request:
 
+# Nothing here touches the GitHub API beyond checkout, so the token needs no
+# write scope; an explicit block also stops it inheriting wider repo defaults.
+permissions:
+  contents: read
+
+# A branch push and its pull_request event overlap constantly. Superseded runs
+# only tie up runners and delay the checks that matter.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest

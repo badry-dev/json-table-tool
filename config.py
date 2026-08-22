@@ -67,6 +67,20 @@ def env_int_set(name, default):
         ) from None
 
 
+def env_positive_int(name, default):
+    """
+    Read an integer setting that must be >= 1.
+
+    ThreadPoolExecutor rejects max_workers <= 0, so without this an
+    API_DNS_MAX_WORKERS of 0 sailed through import and blew up as a 500 inside
+    the first API fetch instead of failing fast like every other misconfiguration.
+    """
+    value = env_int(name, default)
+    if value < 1:
+        raise RuntimeError(f'Environment variable {name} must be >= 1, got {value}')
+    return value
+
+
 class Config:
     """Flask configuration with env var overrides."""
 
@@ -86,7 +100,7 @@ class Config:
     # timeout and cannot be cancelled. API_DNS_MAX_WORKERS bounds concurrency,
     # which is the actual worker-starvation fix.
     API_DNS_TIMEOUT = env_int('API_DNS_TIMEOUT', 3)
-    API_DNS_MAX_WORKERS = env_int('API_DNS_MAX_WORKERS', 4)
+    API_DNS_MAX_WORKERS = env_positive_int('API_DNS_MAX_WORKERS', 4)
     API_DNS_ADMISSION_TIMEOUT = env_int('API_DNS_ADMISSION_TIMEOUT', 1)
 
     # Ports the API-fetch feature may connect to (F6.2/D5). Only the IP was

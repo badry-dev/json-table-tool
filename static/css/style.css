@@ -985,14 +985,14 @@ th.sort-desc::after {
 .filter-count,
 .row-warning {
     font-size: 0.85rem;
-    color: var(--text-secondary, #8b949e);
+    color: var(--text-secondary);
 }
 
 .row-warning {
     padding: 8px 12px;
     margin-bottom: 12px;
     border-radius: 6px;
-    border: 1px solid var(--border, #30363d);
+    border: 1px solid var(--border-color);
 }
 
 .btn-small {
@@ -1015,8 +1015,8 @@ th.sort-desc::after {
     overflow-y: auto;
     padding: 8px;
     border-radius: 8px;
-    border: 1px solid var(--border, #30363d);
-    background: var(--bg-elevated, #161b22);
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
 }
 
 .column-dropdown.visible {
@@ -1039,13 +1039,13 @@ th.sort-desc::after {
     padding: 0;
     margin: -1px;
     overflow: hidden;
-    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
     white-space: nowrap;
     border: 0;
 }
 
 .text-muted {
-    color: var(--text-secondary, #8b949e);
+    color: var(--text-secondary);
 }
 
 /* "Show N more" control inside the tree picker (keeps nodes past the per-level
@@ -1058,7 +1058,7 @@ th.sort-desc::after {
     border: none;
     padding: 4px 0;
     font: inherit;
-    color: var(--accent, #58a6ff);
+    color: var(--accent-primary);
     cursor: pointer;
 }
 

@@ -219,8 +219,8 @@
                     <button class="btn btn-secondary btn-small" type="button" id="loadAllBtn">Load all</button>
                     <div class="column-group">
                         <button class="btn btn-secondary btn-small" type="button" id="columnsBtn"
-                                aria-haspopup="true" aria-expanded="false" aria-controls="columnsDropdown">Columns</button>
-                        <div class="column-dropdown" id="columnsDropdown" role="menu" aria-labelledby="columnsBtn"></div>
+                                aria-expanded="false" aria-controls="columnsDropdown">Columns</button>
+                        <div class="column-dropdown" id="columnsDropdown" role="group" aria-labelledby="columnsBtn"></div>
                     </div>
                 </div>
             </div>
@@ -240,8 +240,8 @@
 
     <!-- About modal (replaces alert(), which CSP-safe code should not rely on) -->
     <div class="modal-overlay" id="aboutModal">
-        <div class="modal">
-            <div class="modal-title">JSON &rarr; Table Converter</div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+            <div class="modal-title" id="aboutTitle">JSON &rarr; Table Converter</div>
             <div class="modal-subtitle">
                 <p>Version <span id="aboutVersion">{{ config.APP_VERSION }}</span></p>
                 <p>Built with Flask + Python. No data is ever stored or logged.</p>
@@ -254,8 +254,8 @@
 
     <!-- Path selector modal (JSON tree) -->
     <div class="modal-overlay" id="pathModal">
-        <div class="modal modal-tree">
-            <div class="modal-title">Choose JSON level for the table</div>
+        <div class="modal modal-tree" role="dialog" aria-modal="true" aria-labelledby="pathModalTitle">
+            <div class="modal-title" id="pathModalTitle">Choose JSON level for the table</div>
             <div class="modal-subtitle">
                 Click any <strong>array</strong> or <strong>object</strong> node to build the table from it.
                 Arrays of objects become multi-row tables; a single object becomes a one-row table.
