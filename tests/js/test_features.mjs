@@ -166,4 +166,41 @@ check(() => {
     }
 });
 
+// downloadDelimited used to carry its own copy of the blob/anchor code. It now
+// delegates to downloadChunks, so what is asserted is that CSV and TSV still
+// come out with the right MIME type and the chunked body -- i.e. the delegation
+// did not quietly change either.
+check(() => {
+    const { downloadDelimited } = context;
+    assert.equal(typeof downloadDelimited, 'function');
+
+    const OriginalBlob = context.Blob;
+    const seen = [];
+    context.Blob = class RecordingBlob extends OriginalBlob {
+        constructor(parts, options) {
+            super(parts, options);
+            seen.push({ parts, type: options && options.type });
+        }
+    };
+
+    try {
+        const columns = ['a', 'b'];
+        const rows = [{ a: 1, b: 'x' }];
+
+        downloadDelimited(columns, rows, ',', 'exported_data.csv');
+        downloadDelimited(columns, rows, '\t', 'exported_data.tsv');
+
+        assert.equal(seen.length, 2);
+        assert.equal(seen[0].type, 'text/csv; charset=utf-8');
+        assert.equal(seen[1].type, 'text/tab-separated-values; charset=utf-8');
+
+        // Chunked, not one concatenated string: the whole point of the builders.
+        assert.ok(Array.isArray(seen[0].parts));
+        assert.ok(seen[0].parts.join('').includes('a,b'));
+        assert.ok(seen[1].parts.join('').includes('a\tb'));
+    } finally {
+        context.Blob = OriginalBlob;
+    }
+});
+
 console.log(`ok - ${checks} client feature assertions passed`);

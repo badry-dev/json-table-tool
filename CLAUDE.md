@@ -104,6 +104,7 @@ python app.py
 - `extract_table_data(json_data, _depth, max_depth)` — Extracts tabular rows from various JSON shapes (top-level array, dict containing an array of objects, nested dicts, or a single object). Depth-capped like `flatten_for_csv`.
 - `sanitize_cell(value)` / `serialize_cell_value(value)` / `is_formula_trigger(value)` — Formula-injection defenses for **spreadsheet formats only** (CSV/TSV/XLSX). JSONL and Markdown exports must not use them.
 - `preview_truncate(row)` — Builds a capped **copy** of a preview row (long strings, wide nested objects/arrays). Never mutates the source, so exports stay full-fidelity.
+- `format_size(num_bytes)` — Renders a byte count in the largest non-zero unit. Lives here, not in `app.py`, so `routes.py` can use it without importing `app.py` (that cycle broke every routes-first import).
 - `get_all_columns(data)` — Returns sorted unique column names across rows.
 - `parse_jsonl(text)` — Parses JSON Lines (one JSON value per non-empty line), raising `ValueError` with line numbers on errors.
 - `extract_by_path(json_data, path)` — Navigates JSON by dot-notation path (`(root)` returns the document itself).

@@ -177,6 +177,27 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 
 
 ---
+### 2026-08-22 — `routes.py` must never import `app.py`  (area: backend)
+
+**What:** Shared utilities go in `helpers.py` (or another leaf module), never in `app.py`. `helpers.format_size` is there for exactly this reason.
+**Why:** `create_app()` imports `bp` from `routes.py`, so a module-level `from app import ...` in `routes.py` makes `import routes` re-enter a half-initialized module and raise `ImportError`. It hid for a while because gunicorn's `app:create_app()` imports app-first, which happens to work — only routes-first entry points broke.
+**How to apply:** `TestNoImportCycle` in `tests/test_routes.py` imports each module first in a fresh subprocess and AST-checks that `routes.py` does not import `app`. If you need something from `app.py` in a route, move it down, don't import up.
+
+**Owner / source:** CodeRabbit review on the v1.2.0 PR.
+
+
+---
+
+### 2026-08-22 — A blank element in an integer-list env var is an error, not a default  (area: deploy / security)
+
+**What:** `config.env_int_set` rejects `80,,443`, `80,443,` and a lone `,`. Only an *unset* variable selects the default; only a fully empty value disables the check.
+**Why:** `security.validate_url` reads an empty allowlist as "no port restriction". Skipping blank elements meant `API_ALLOWED_PORTS=,` silently removed the outbound port restriction, and `80,,443` silently narrowed it — both from a typo, with no startup error.
+**How to apply:** Any list-valued setting whose empty state weakens a check must fail loudly on a malformed element. Never `if part.strip()` your way past bad input in a security setting.
+
+**Owner / source:** CodeRabbit review on the v1.2.0 PR.
+
+
+---
 
 ## Conventions for Adding Entries
 

@@ -20,13 +20,13 @@ from openpyxl import Workbook
 from requests.auth import HTTPBasicAuth
 from werkzeug.exceptions import HTTPException
 
-from app import _format_size
 from config import DEFAULT_MAX_EXPORT_CELLS
 from extensions import limiter
 from helpers import (
     extract_by_path,
     extract_table_data,
     flatten_rows,
+    format_size,
     get_all_columns,
     is_formula_trigger,
     parse_jsonl,
@@ -307,7 +307,7 @@ def _load_from_api(data_format):
                     return None, (
                         jsonify(
                             {
-                                'error': f'API response exceeds maximum size ({_format_size(max_size)})'
+                                'error': f'API response exceeds maximum size ({format_size(max_size)})'
                             }
                         ),
                         400,
@@ -328,6 +328,12 @@ def _load_from_api(data_format):
         # user-controlled is logged at all.
         logger.warning('API request failed')
         return None, (jsonify({'error': 'API request failed'}), 400)
+    except UnicodeDecodeError:
+        # A subclass of ValueError, so it has to be caught first -- otherwise a
+        # binary or latin-1 response was reported as malformed JSONL, which
+        # sends the caller looking at the wrong thing (and is simply untrue for
+        # a JSON request).
+        return None, (jsonify({'error': 'API response must be UTF-8 encoded'}), 400)
     except json.JSONDecodeError:
         return None, (jsonify({'error': 'API response is not valid JSON'}), 400)
     except ValueError:

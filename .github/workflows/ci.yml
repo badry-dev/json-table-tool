@@ -12,8 +12,13 @@ permissions:
 
 # A branch push and its pull_request event overlap constantly. Superseded runs
 # only tie up runners and delay the checks that matter.
+#
+# github.ref alone does NOT dedupe them: a push is refs/heads/<branch> while the
+# pull_request event is refs/pull/<n>/merge, so both ran on every push to a PR
+# branch. head_ref is the source branch on a pull_request and empty on a push,
+# so this collapses the pair onto one group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing after this step talks to GitHub, so leaving the token in
+          # .git/config only widens what a compromised dependency can reach.
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

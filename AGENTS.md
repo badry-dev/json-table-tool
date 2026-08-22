@@ -69,6 +69,7 @@ python -m pytest tests/ -v
   - `flatten_rows(rows, max_depth=10)` — one pass returning `(flattened_rows, sorted_columns)`; replaces flatten-then-`get_all_columns`.
   - `sanitize_cell(value)` / `serialize_cell_value(value)` / `is_formula_trigger(value)` — spreadsheet formula-injection defenses. **CSV/TSV/XLSX only.**
   - `preview_truncate(row)` — capped *copy* of a preview row; never mutates the source.
+  - `format_size(num_bytes)` — byte count in the largest non-zero unit. Shared utilities live here, **never in `app.py`**: `create_app()` imports `bp` from `routes.py`, so importing up creates a cycle.
   - `parse_jsonl(text)` — line-by-line JSON; raises `ValueError` with the offending line number.
   - `extract_by_path(json_data, path)` — dot-notation navigation; `'(root)'` is the sentinel for top-level lists.
   - `get_all_columns(data)` — sorted union of keys.
@@ -111,7 +112,11 @@ python -m pytest tests/ -v
 - Apply `@limiter.limit(lambda: current_app.config.get('RATE_LIMIT_...'))` on any new mutating route.
 - Read config via `current_app.config['KEY']`, not by re-importing `Config` at request time.
 - For new auth methods on the API tab: add a select option in `index.html`, a `data-auth="..."` fieldset, the JS visibility branch in `app.js`, and the conditional in `routes.py`.
-- For new exports: add the entry to the export dropdown, the handler in `app.js`, optionally a server route in `routes.py`. Pin any new dependency. **Decide the sanitization policy explicitly**: spreadsheet-compatible formats go through `sanitize_cell`; non-spreadsheet formats (JSONL, Markdown) must not.
+- For new exports: add the entry to the export dropdown, the handler in `app.js`, optionally a server route in `routes.py`. Pin any new dependency. **Decide the sanitization policy explicitly.** Spreadsheet-compatible formats need one of two defenses, not both:
+  - **Quote-prefix via `sanitize_cell`** for formats with no type channel (CSV, TSV). The prefix is the only place a value can be marked as text.
+  - **Pin the cell type** for formats that have one. `/export-xlsx` sets `data_type='s'` on every cell, so openpyxl writes a string cell and Excel never evaluates it; prefixing on top would put a stray `'` in the data.
+
+  Non-spreadsheet formats (JSONL, Markdown) get neither — a prefix there corrupts values while protecting nothing.
 - Add or update tests under `tests/` for any backend behavior change. Class-style grouping (`class TestXxx:`) is the existing pattern.
 - Preserve the CSP. If new third-party CSS/fonts are needed, edit `apply_security_headers` deliberately.
 

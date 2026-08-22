@@ -186,8 +186,17 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Set production environment variables
-export SECRET_KEY="your-random-secret-key-here"
+# Set production environment variables.
+#
+# SECRET_KEY must be a random value you generate, not a literal copied from this
+# README. The startup gate rejects the dev default and an empty value, but it
+# cannot tell a real secret from a memorable one someone pasted:
+#
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+#
+# Every SECRET_KEY placeholder below means "the output of that command", kept
+# out of the shell history and out of version control.
+export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 export FLASK_DEBUG=0
 export APP_ENV=production
 
@@ -217,7 +226,7 @@ After=network.target
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/json-table-tool
-Environment="SECRET_KEY=your-random-secret-key-here"
+Environment="SECRET_KEY=<output of the token_urlsafe command above>"
 Environment="FLASK_DEBUG=0"
 Environment="APP_ENV=production"
 Environment="WEB_CONCURRENCY=1"
@@ -282,7 +291,7 @@ CMD gunicorn "app:create_app()" --bind 0.0.0.0:8000 --workers "$WEB_CONCURRENCY"
 ```bash
 docker build -t json-table-tool .
 docker run -p 8000:8000 \
-  -e SECRET_KEY="your-random-secret-key-here" \
+  -e SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
   json-table-tool
 ```
 
@@ -323,8 +332,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SECRET_KEY=your-random-secret-key-here
+      # See the SECRET_KEY note above: generate this, do not copy a literal.
+      - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY in .env or the environment}
       - FLASK_DEBUG=0
+      - APP_ENV=production
+      - WEB_CONCURRENCY=1
+      - APP_REPLICAS=1
       - RATE_LIMIT_PROCESS=30/minute
       - RATE_LIMIT_EXPORT=60/minute
     restart: unless-stopped
@@ -333,6 +346,14 @@ services:
 ```bash
 docker compose up -d
 ```
+
+This compose file terminates **no TLS** — it publishes plain HTTP on 8000, which
+is only appropriate behind something that does. Credentials for the API-fetch
+feature are POSTed from the browser, so put this behind the Nginx/Let's Encrypt
+front end from the section above (or your platform's load balancer) and do not
+publish port 8000 to the internet directly. With TLS terminated upstream, also
+set `TRUST_PROXY=1` so rate limiting and the `Secure` cookie flag see the real
+client address and scheme.
 
 ### Railway.app
 
@@ -416,7 +437,8 @@ basic-auth passwords are POSTed from the browser to this app.
   - **TSV** — Tab-separated values (generated instantly in your browser)
   - **JSONL** — one JSON object per line, over the same flattened columns the
     table shows, with values unescaped (no formula prefixing applied)
-  - **Markdown** — a Markdown table, with Markdown-specific escaping
+  - **Markdown** — a Markdown table; `|`, `\` and line breaks are escaped so a
+    value cannot break the table, but no formula prefixing is applied
   - **Excel** — `.xlsx` file via server-side generation
 - All formats export ALL rows (not just the preview)
 - Excel is greyed out when the dataset exceeds `MAX_EXPORT_CELLS`; CSV and TSV
@@ -474,10 +496,12 @@ basic-auth passwords are POSTed from the browser to this app.
   X-Content-Type-Options, Referrer-Policy, and `Cache-Control: no-store` on data responses
 - **Formula-injection defense**: values starting with `=`, `+`, `-`, `@`, tab, CR or LF
   are neutralized in CSV, TSV and Excel exports, so an untrusted value cannot become a
-  live formula when the file is opened. JSONL and Markdown are deliberately left
-  unescaped: JSON carries types and nothing evaluates it, and a leading `=` is
-  inert in Markdown, so prefixing there would corrupt values while protecting
-  nothing
+  live formula when the file is opened. JSONL and Markdown deliberately do *not*
+  get that prefix: JSON carries types and nothing evaluates it, and a leading `=`
+  is inert in Markdown, so prefixing there would corrupt values while protecting
+  nothing. (Markdown still escapes `|`, `\` and line breaks — that is table
+  structure, not formula defense. Anyone pasting a Markdown or JSONL export into
+  a spreadsheet is back to unprotected input: export CSV, TSV or Excel for that.)
 - **Startup gates**: with `APP_ENV=production`, the app refuses to start on the
   development `SECRET_KEY` or with a rate-limit topology it cannot enforce
 - **HTTPS**: Render provides free SSL/TLS; use Nginx/Let's Encrypt for self-hosted.

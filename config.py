@@ -54,13 +54,26 @@ def env_int_set(name, default):
     Only an UNSET variable selects the default. An explicitly empty value yields
     an empty set, which is how an operator disables a list-based check -- folding
     the two together silently restored the default and made the documented
-    escape hatch a no-op.
+    escape hatch a no-op. A blank element inside a non-empty list (`80,,443`, or
+    a lone `,`) is rejected rather than dropped, because dropping it can empty a
+    security allowlist without saying so.
     """
     raw = os.environ.get(name)
     if raw is None:
         raw = default
+    if raw.strip() == '':
+        return frozenset()
+    parts = [part.strip() for part in raw.split(',')]
+    if not all(parts):
+        # `80,,443` and a lone `,` used to silently drop an element or empty the
+        # set entirely. security.validate_url reads an empty allowlist as
+        # "unrestricted", so a typo removed the outbound port restriction.
+        raise RuntimeError(
+            f'Environment variable {name} has an empty element, got {raw!r}; '
+            f'use an empty value to disable the check'
+        )
     try:
-        return frozenset(int(part.strip()) for part in raw.split(',') if part.strip())
+        return frozenset(int(part) for part in parts)
     except ValueError:
         raise RuntimeError(
             f'Environment variable {name} must be a comma-separated list of integers, got {raw!r}'

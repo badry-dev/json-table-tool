@@ -11,6 +11,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import DEV_SECRET_KEY, Config, is_production
 from extensions import csrf, limiter
+from helpers import format_size
 from security import apply_security_headers
 
 logger = logging.getLogger(__name__)
@@ -191,19 +192,6 @@ def check_rate_limit_topology(app, argv=None):
     logger.warning(message)
 
 
-def _format_size(num_bytes):
-    """
-    Render a byte count in the largest unit that stays non-zero.
-
-    Integer-dividing by a MiB reported "max 0MB" for any limit below 1 MiB,
-    which tells an operator nothing about what they configured.
-    """
-    for unit, size in (('MB', 1024 * 1024), ('KB', 1024)):
-        if num_bytes >= size:
-            return f'{num_bytes // size}{unit}'
-    return f'{num_bytes} bytes'
-
-
 def _register_error_handlers(app):
     """
     Keep every error response JSON (F10).
@@ -223,7 +211,7 @@ def _register_error_handlers(app):
     @app.errorhandler(413)
     def _request_entity_too_large(_error):
         limit = app.config.get('MAX_CONTENT_LENGTH') or 0
-        return jsonify({'error': f'Request too large (max {_format_size(limit)})'}), 413
+        return jsonify({'error': f'Request too large (max {format_size(limit)})'}), 413
 
     @app.errorhandler(500)
     def _internal_server_error(_error):

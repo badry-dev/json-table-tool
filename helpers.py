@@ -259,3 +259,21 @@ def preview_truncate(
         key: _truncate_preview_value(value, max_string, max_items, 1, max_depth)
         for key, value in row.items()
     }
+
+
+def format_size(num_bytes: int) -> str:
+    """
+    Render a byte count in the largest unit that stays non-zero.
+
+    Integer-dividing by a MiB reported "max 0MB" for any limit below 1 MiB,
+    which tells an operator nothing about what they configured.
+
+    Lives here rather than in app.py because both the 413 handler and the API
+    size cap in routes.py need it: importing it from app.py made `import routes`
+    pull in app.py, which imports `bp` back out of the still-initializing
+    routes module (ImportError on any routes-first import).
+    """
+    for unit, size in (('MB', 1024 * 1024), ('KB', 1024)):
+        if num_bytes >= size:
+            return f'{num_bytes // size}{unit}'
+    return f'{num_bytes} bytes'

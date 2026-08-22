@@ -129,6 +129,11 @@ class TestBoundedDnsAdmission:
 
     RESOLVED = [(2, 1, 6, '', ('93.184.216.34', 0))]
 
+    # Patched into security below; the assertions are written as multiples of
+    # these so tightening a bound cannot leave a stale fixed number passing.
+    DNS_TIMEOUT = 0.2
+    ADMISSION_TIMEOUT = 0.1
+
     @pytest.fixture
     def blocking_dns(self, monkeypatch):
         """A getaddrinfo that hangs until the test releases it."""
@@ -140,9 +145,9 @@ class TestBoundedDnsAdmission:
             return self.RESOLVED
 
         monkeypatch.setattr(security.socket, 'getaddrinfo', slow_getaddrinfo)
-        monkeypatch.setattr(security, 'DEFAULT_DNS_TIMEOUT', 0.2)
+        monkeypatch.setattr(security, 'DEFAULT_DNS_TIMEOUT', self.DNS_TIMEOUT)
         monkeypatch.setattr(security, 'DEFAULT_DNS_MAX_WORKERS', 2)
-        monkeypatch.setattr(security, 'DEFAULT_DNS_ADMISSION_TIMEOUT', 0.1)
+        monkeypatch.setattr(security, 'DEFAULT_DNS_ADMISSION_TIMEOUT', self.ADMISSION_TIMEOUT)
         security.reset_resolver_pool()
 
         yield release
@@ -171,7 +176,14 @@ class TestBoundedDnsAdmission:
             elapsed = time.monotonic() - started
             assert not is_valid
             assert 'resolve' in error.lower()
-            assert elapsed < 5, f'caller waited {elapsed:.2f}s, not the configured bound'
+            # Generous multiple of the configured bound: this asserts the wait
+            # is bounded BY THE SETTING, not by an unrelated constant that would
+            # keep passing if the setting were ignored.
+            budget = self.DNS_TIMEOUT * 10
+            assert elapsed < budget, (
+                f'caller waited {elapsed:.2f}s, over {budget:.2f}s '
+                f'(10x the configured {self.DNS_TIMEOUT}s bound)'
+            )
 
         # The permits stay held: the lookups are still running. Releasing on
         # caller timeout would re-admit work into an already-blocked pool.
@@ -198,8 +210,9 @@ class TestBoundedDnsAdmission:
 
         assert not is_valid
         assert 'busy' in error.lower()
-        # Rejected on the short admission wait, not queued behind the lookups.
-        assert elapsed < 1
+        # Rejected on the short admission wait, not queued behind the lookups:
+        # under the DNS timeout, so a caller that queued instead would fail here.
+        assert elapsed < self.DNS_TIMEOUT
 
     def test_repeated_timeouts_do_not_grow_the_pool(self, blocking_dns):
         pool = security.get_resolver_pool()
@@ -243,7 +256,7 @@ class TestBoundedDnsAdmission:
         security.reset_resolver_pool()
 
         # Still running well past API_DNS_TIMEOUT: that is the documented exposure.
-        time.sleep(0.5)
+        time.sleep(self.DNS_TIMEOUT * 2.5)
         assert any(thread.is_alive() for thread in threads)
 
         blocking_dns.set()

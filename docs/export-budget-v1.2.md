@@ -62,7 +62,7 @@ count says almost nothing about the footprint on its own.
 
 Fitting the two bracketing points of the 3-column series:
 
-```
+```text
 (150,000 cells, 84.3 MiB) and (274,998 cells, 152.2 MiB)
 slope     = 0.000543 MiB/cell
 intercept = 2.8 MiB

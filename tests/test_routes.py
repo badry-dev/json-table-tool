@@ -1,12 +1,17 @@
 """Tests for Flask routes."""
 
+import ast
 import csv
 import gzip
 import importlib
 import io
 import json
 import logging
+import os
+import pathlib
 import re
+import subprocess
+import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -1910,6 +1915,24 @@ class TestPortAllowlistEnvParsing:
             mock_dns.return_value = [(2, 1, 6, '', ('93.184.216.34', 0))]
             assert validate_url('http://public.example.com:22/x')[0] is True
 
+    def test_a_lone_comma_is_rejected_not_read_as_disabled(self, fresh_config):
+        # A bare ',' is a typo, not the documented escape hatch. Reading it as
+        # an empty set would drop the outbound port restriction silently.
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS has an empty element'):
+            fresh_config(API_ALLOWED_PORTS=',')
+
+    def test_a_blank_element_inside_a_list_is_rejected(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS has an empty element'):
+            fresh_config(API_ALLOWED_PORTS='80,,443')
+
+    def test_a_trailing_comma_is_rejected(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS has an empty element'):
+            fresh_config(API_ALLOWED_PORTS='80,443,')
+
+    def test_the_rejection_names_the_escape_hatch(self, fresh_config):
+        with pytest.raises(RuntimeError, match='use an empty value to disable the check'):
+            fresh_config(API_ALLOWED_PORTS='80, ,443')
+
 
 class TestReadinessStorageCheck:
     """
@@ -2024,10 +2047,10 @@ class TestSizeMessageFormatting:
         assert json.loads(response.data)['error'] == 'Request too large (max 2MB)'
 
     def test_tiny_limit_is_reported_in_bytes(self):
-        from app import _format_size
+        from helpers import format_size
 
-        assert _format_size(500) == '500 bytes'
-        assert _format_size(0) == '0 bytes'
+        assert format_size(500) == '500 bytes'
+        assert format_size(0) == '0 bytes'
 
 
 class TestDnsWorkerCountValidation:
@@ -2046,3 +2069,101 @@ class TestDnsWorkerCountValidation:
     def test_positive_workers_is_accepted(self, fresh_config):
         cfg = fresh_config(API_DNS_MAX_WORKERS='8')
         assert cfg.API_DNS_MAX_WORKERS == 8
+
+
+class TestNoImportCycle:
+    """
+    routes.py must not import app.py.
+
+    app.py's create_app() imports `bp` out of routes.py, so a module-level
+    `from app import ...` in routes.py made `import routes` re-enter a
+    half-initialized module and raise ImportError. Only an app-first import
+    order happened to work, which is why the app booted under gunicorn while
+    any routes-first entry point was broken.
+    """
+
+    @staticmethod
+    def _import_in_a_fresh_process(statement):
+        return subprocess.run(
+            [sys.executable, '-c', statement],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            capture_output=True,
+            text=True,
+        )
+
+    def test_routes_can_be_imported_first(self):
+        result = self._import_in_a_fresh_process('import routes; print(routes.bp.name)')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == 'main'
+
+    def test_app_can_still_be_imported_first(self):
+        result = self._import_in_a_fresh_process('import app; print(app.create_app().name)')
+        assert result.returncode == 0, result.stderr
+
+    def test_routes_does_not_import_the_app_module(self):
+        source = pathlib.Path(__file__).resolve().parent.parent / 'routes.py'
+        tree = ast.parse(source.read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split('.')[0])
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name.split('.')[0] for alias in node.names)
+        assert 'app' not in imported
+
+
+class TestApiResponseEncoding:
+    """
+    CodeRabbit review: UnicodeDecodeError subclasses ValueError.
+
+    Before the dedicated handler, a non-UTF-8 API response fell through to the
+    JSONL branch and was reported as malformed JSONL -- untrue for a JSON
+    request, and misleading in both.
+    """
+
+    @staticmethod
+    def _fetch(client, chunks, data_format='json'):
+        with (
+            patch('routes.requests.get') as mock_get,
+            patch('routes.validate_url') as mock_validate,
+        ):
+            mock_validate.return_value = (True, None)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.iter_content.return_value = chunks
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.__enter__.return_value = mock_resp
+            mock_get.return_value = mock_resp
+            return client.post(
+                '/process',
+                data={
+                    'input_method': 'api',
+                    'api_url': 'https://api.example.com/data',
+                    'data_format': data_format,
+                    'json_path': '(root)',
+                },
+            )
+
+    def test_non_utf8_json_response_reports_the_encoding(self, client):
+        # A latin-1 encoded body: valid JSON bytes, invalid UTF-8.
+        response = self._fetch(client, ['{"name": "caf\xe9"}'.encode('latin-1')])
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response must be UTF-8 encoded'
+
+    def test_non_utf8_jsonl_response_reports_the_encoding_too(self, client):
+        response = self._fetch(
+            client, ['{"name": "caf\xe9"}'.encode('latin-1')], data_format='jsonl'
+        )
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response must be UTF-8 encoded'
+
+    def test_malformed_jsonl_still_reports_jsonl(self, client):
+        # The encoding handler must not swallow the case it sits in front of.
+        response = self._fetch(client, [b'{"a": 1}\n{bad}'], data_format='jsonl')
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response is not valid JSONL'
+
+    def test_malformed_json_still_reports_json(self, client):
+        response = self._fetch(client, [b'{not json}'])
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response is not valid JSON'

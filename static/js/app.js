@@ -1140,22 +1140,14 @@ function downloadChunks(chunks, mimeType, filename) {
     a.remove();
 }
 
-// Client-side CSV/TSV generation
+// Client-side CSV/TSV generation. The blob/anchor dance lives in
+// downloadChunks alone -- duplicating it here meant a fix to one copy (an
+// unrevoked object URL, say) silently missed CSV and TSV.
 function downloadDelimited(columns, data, delimiter, filename) {
-    const chunks = buildDelimitedChunks(columns, data, delimiter);
-
     const mimeType = delimiter === '\t'
         ? 'text/tab-separated-values; charset=utf-8'
         : 'text/csv; charset=utf-8';
-    const blob = new Blob(chunks, { type: mimeType });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    window.URL.revokeObjectURL(url);
-    a.remove();
+    downloadChunks(buildDelimitedChunks(columns, data, delimiter), mimeType, filename);
 }
 
 // Server-side Excel export (needs openpyxl)
