@@ -95,9 +95,12 @@ done; 7.2 is partial (see Section 2).
 
 ### 1.6 Measurement work
 
-`MAX_EXPORT_CELLS = 250 000` is a measured number, derived by the two-fresh-process
-`ru_maxrss` protocol, with a confirming point re-run at the shipped value. Method,
-data and derivation: **Appendix A**.
+`MAX_EXPORT_CELLS = 250 000` is a measured number rather than a chosen one, derived
+by the two-fresh-process `ru_maxrss` method with a confirming point re-run at the
+shipped value. It is *indicative, not protocol-conformant*: one run-pair per shape
+through the Flask test client, where the Appendix B verdict calls for the median of
+three through a gunicorn worker. Adequate for sizing the default; not a recorded
+budget pass. Method, data and derivation: **Appendix A**.
 
 ---
 
@@ -135,8 +138,12 @@ data and derivation: **Appendix A**.
   `Makefile`, or CI. The roadmap deliberately marked mypy optional and skipped
   strict mode; the remaining work is the two unannotated modules plus a mypy
   configuration if it is wanted.
-- **Perf budget verification (Appendix B).** The XLSX row of the budget
-  was measured. The rest of the table — `/process` transfer size ≤ 2–4 MB,
+- **Perf budget verification (Appendix B).** No row of the budget has a
+  protocol-conformant verdict. The XLSX row has an indicative measurement
+  (Appendix A) that deviates from the protocol in two ways — the Flask test client
+  instead of a gunicorn worker, and one run-pair instead of the median of three —
+  so re-running it conformantly is outstanding work, not a formality. The rest of
+  the table — `/process` transfer size ≤ 2–4 MB,
   `/process` p95 ≤ 3 s, `/process` peak-RSS delta ≤ 50 MiB, tree-picker open
   ≤ 500 ms on a 10 MB payload — is defined but has no recorded run. No perf test
   gates CI (`pytest-benchmark` was deferred by decision), so these stay manual.
@@ -264,8 +271,15 @@ measurements needs.
 
 That value was then measured directly rather than left as a fit: 83,333 × 3 =
 249,999 cells came back at **138.9 MiB delta / 179.6 MiB absolute** (the fit
-predicted 138.6). It passes both halves of the verdict — under the 150 MiB delta
-target and well under the 256 MiB absolute ceiling for a 512 MiB container.
+predicted 138.6). Both numbers sit under the Appendix B thresholds — 150 MiB delta
+and the 256 MiB absolute ceiling for a 512 MiB container.
+
+**This is not a protocol-conformant pass, and must not be recorded as one.** The
+verdict in Appendix B is defined as the *median of three run-pairs* through a
+gunicorn worker; this is one run-pair through the Flask test client. The number is
+sound enough to size a default against — that is what it was collected for — but
+the `/export-xlsx` row of the budget has no conformant verdict, only an indicative
+one. See §2.3.
 
 ### What the budget does and does not cover
 
@@ -301,8 +315,10 @@ Record the new data in this appendix. Do not round the result to something tidy.
 ## Appendix B — Perf budget and the RSS measurement protocol
 
 Targets on a reference payload (10 MB, ~200k rows of mixed nesting), single
-free-tier worker. Only the `/export-xlsx` row has a recorded run (Appendix A);
-the rest are defined but unmeasured — see §2.3.
+free-tier worker. **No row has a protocol-conformant verdict.** The
+`/export-xlsx` row has an indicative run (Appendix A: one run-pair via the test
+client, not the median of three through gunicorn); every other row is defined but
+unmeasured. See §2.3.
 
 | Metric | Before v1.2 (est.) | Target |
 |---|---|---|
