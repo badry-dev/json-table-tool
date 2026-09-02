@@ -5,8 +5,8 @@ import os
 # Publicly known, and therefore only ever acceptable outside production.
 DEV_SECRET_KEY = 'dev-secret-key-change-in-production'
 
-# See MAX_EXPORT_CELLS below and docs/export-budget-v1.2.md for how this number
-# was measured.
+# See MAX_EXPORT_CELLS below and docs/plan-status-v1.2.md (Appendix A) for how
+# this number was measured.
 DEFAULT_MAX_EXPORT_CELLS = 250_000
 
 
@@ -164,9 +164,9 @@ class Config:
     # 500 columns have wildly different footprints at the same row count.
     #
     # Enabled by default: an unlimited default would leave P3 (High) unmitigated.
-    # The value is derived from the Performance Review section 4 measurement (see
-    # docs/export-budget-v1.2.md), not chosen by feel -- re-derive it whenever that
-    # measurement is re-run. 0 disables the guard for operators who knowingly opt
+    # The value is derived from the measurement in docs/plan-status-v1.2.md
+    # (Appendix A), not chosen by feel -- re-derive it whenever that measurement
+    # is re-run. 0 disables the guard for operators who knowingly opt
     # out. CSV/TSV stay uncapped and streamed, so every dataset /process accepts
     # remains exportable by some route.
     MAX_EXPORT_CELLS = env_int('MAX_EXPORT_CELLS', DEFAULT_MAX_EXPORT_CELLS)

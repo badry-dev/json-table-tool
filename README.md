@@ -559,7 +559,7 @@ need no server round trip and nothing is persisted — responses over
 `GZIP_MIN_SIZE` are gzipped to keep that affordable. The preview rows are a
 truncated *copy*, so exports keep full fidelity. Excel exports are bounded by
 `MAX_EXPORT_CELLS`, measured rather than guessed
-(`docs/export-budget-v1.2.md`); CSV and TSV stream and stay uncapped. The JSON
+(`docs/plan-status-v1.2.md`, Appendix A); CSV and TSV stream and stay uncapped. The JSON
 tree picker builds children only when a node is opened.
 
 ---

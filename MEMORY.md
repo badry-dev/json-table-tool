@@ -154,7 +154,7 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 ### 2026-08-21 — The XLSX export budget is measured, in cells, and on by default  (area: performance)
 
 **What:** `MAX_EXPORT_CELLS` (default 250,000) caps Excel exports only. CSV/TSV are generator-streamed and stay uncapped.
-**Why:** openpyxl memory tracks `rows × columns`, not rows — at equal cell counts a narrow, tall sheet costs *more* (84.3 MiB at 50k×3 vs 73.6 at 15k×10), so a row limit says almost nothing about the footprint. The default comes from the measurement in `docs/export-budget-v1.2.md`, not from feel. An unlimited default would leave a High finding unmitigated; uncapped CSV/TSV is what keeps the export contract as wide as the input contract.
+**Why:** openpyxl memory tracks `rows × columns`, not rows — at equal cell counts a narrow, tall sheet costs *more* (84.3 MiB at 50k×3 vs 73.6 at 15k×10), so a row limit says almost nothing about the footprint. The default comes from the measurement in `docs/plan-status-v1.2.md` (Appendix A), not from feel. An unlimited default would leave a High finding unmitigated; uncapped CSV/TSV is what keeps the export contract as wide as the input contract.
 **How to apply:** Re-derive the number whenever the measurement is re-run — do not round it to something tidy. Never truncate an oversized export: `/process` advertises `total_cells`/`max_export_cells` so the client greys Excel out beforehand, and `/export-xlsx` returns 400 for direct callers. And keep exports diskless: openpyxl's `write_only` mode writes worksheet parts to OS temp files, and `SpooledTemporaryFile` is either pointless (its default `max_size=0` never rolls over) or disk-backed.
 
 **Owner / source:** performance review P3, decision D6.
