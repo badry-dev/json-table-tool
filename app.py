@@ -89,7 +89,11 @@ def compress_response(response):
 
     _mark_varies_on_encoding(response)
 
-    if 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
+    # A substring test on the raw header treats `gzip;q=0` -- an explicit refusal
+    # -- as permission, because the token is present either way. Werkzeug's
+    # parsed Accept applies the q-values, so a zero quality reads as "not
+    # acceptable" and `*` reads as "anything", both per RFC 9110 12.5.3.
+    if request.accept_encodings.quality('gzip') <= 0:
         return response
 
     data = response.get_data()
