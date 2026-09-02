@@ -44,8 +44,9 @@ No response key changed name, type or meaning; `/process` only gained keys.
   `API_DNS_TIMEOUT`, and once the pool is saturated further requests are refused
   on `API_DNS_ADMISSION_TIMEOUT` instead of queueing. The lookup itself is not
   bounded — `getaddrinfo` exposes no timeout and cannot be cancelled, so the
-  pool thread stays occupied until the platform resolver returns, and pool
-  teardown waits on it. `API_ALLOWED_PORTS` defaults to `80,443,8443`.
+  pool thread stays occupied until the platform resolver returns.
+  `reset_resolver_pool()` shuts the pool down with `wait=False` and returns
+  immediately, so it does not block on that thread; interpreter exit still can. `API_ALLOWED_PORTS` defaults to `80,443,8443`.
 - **SECRET_KEY fail-fast (F7).** `APP_ENV=production` with the publicly known
   dev key (or an empty one) refuses to start. Integer settings now report which
   variable was mistyped.

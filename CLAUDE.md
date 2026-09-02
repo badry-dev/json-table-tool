@@ -66,7 +66,7 @@ json-table-tool/
 - **Production server:** gunicorn 22.0.0
 - **Testing:** pytest 9.0.3 (dev deps in `requirements-dev.txt`); Node assertions for `app.js`
 - **Deployment:** Render.com (free tier; auto-deploy gated on CI via `autoDeployTrigger: checksPass`)
-- **App version:** 1.2.0 (`config.APP_VERSION`, exposed via `/health`)
+- **App version:** 1.2.0 (`Config.APP_VERSION`, exposed via `/health`)
 
 ## Development Setup
 

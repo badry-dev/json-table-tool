@@ -19,7 +19,13 @@ import pytest
 from flask import Response, request
 
 import config as config_module
-from app import check_rate_limit_topology, create_app, worker_count_from_start_command
+from app import (
+    check_fetch_timeout_headroom,
+    check_rate_limit_topology,
+    create_app,
+    worker_count_from_start_command,
+    worker_timeout_from_start_command,
+)
 from extensions import client_ip_key
 from security import validate_url
 
@@ -168,6 +174,29 @@ class TestExportCsvRoute:
         response = client.post(
             '/export-csv',
             data=json.dumps({'csv_data': [], 'csv_columns': []}),
+            content_type='application/json',
+        )
+        assert response.status_code == 400
+
+    def test_non_dict_row_is_rejected_before_the_stream_starts(self, client):
+        # _stream_csv calls row.get(), and the generator body runs after the
+        # headers are already on the wire -- so without an up-front check this
+        # returned 200 and then raised AttributeError mid-body, leaving the
+        # client with a truncated file it had no way to recognize as an error.
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': ['x'], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 400
+        assert response.get_json()['error'] == 'csv_data must be a list of objects'
+        # Reading the body must not raise: nothing was streamed.
+        assert b'AttributeError' not in response.get_data()
+
+    def test_a_non_dict_row_after_valid_rows_is_rejected(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': 1}, None], 'csv_columns': ['a']}),
             content_type='application/json',
         )
         assert response.status_code == 400
@@ -1231,6 +1260,26 @@ class TestGzipCompression:
         assert 'Accept-Encoding' in response.headers['Vary']
         assert json.loads(response.data)['total_rows'] == 400
 
+    def test_explicit_gzip_refusal_is_honored(self, client):
+        # `gzip;q=0` names gzip only to reject it. A substring test on the raw
+        # header read that as permission and compressed anyway.
+        response = self._process(client, **{'Accept-Encoding': 'gzip;q=0'})
+        assert 'Content-Encoding' not in response.headers
+        assert json.loads(response.data)['total_rows'] == 400
+
+    def test_refusal_among_other_encodings_is_honored(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'br, gzip;q=0'})
+        assert 'Content-Encoding' not in response.headers
+
+    def test_positive_quality_still_compresses(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'gzip;q=0.5'})
+        assert response.headers['Content-Encoding'] == 'gzip'
+
+    def test_wildcard_accepts_gzip(self, client):
+        # RFC 9110 12.5.3: `*` matches any encoding not otherwise named.
+        response = self._process(client, **{'Accept-Encoding': '*'})
+        assert response.headers['Content-Encoding'] == 'gzip'
+
     def test_small_response_is_not_compressed(self, client):
         response = client.get('/health', headers={'Accept-Encoding': 'gzip'})
         assert 'Content-Encoding' not in response.headers
@@ -1312,8 +1361,6 @@ class TestStreamingCsvExport:
 
     def test_response_is_streamed(self, app):
         client = app.test_client()
-        with app.test_request_context():
-            pass
         response = client.post(
             '/export-csv',
             data=json.dumps(
@@ -1670,6 +1717,74 @@ class TestRateLimitTopologyGuard:
         assert worker_count_from_start_command(['gunicorn', '--bind', ':80']) is None
         assert worker_count_from_start_command(['gunicorn', '--workers', 'x']) is None
         assert worker_count_from_start_command([]) is None
+
+
+class TestFetchTimeoutHeadroom:
+    """P9 - API_FETCH_TIMEOUT must stay under gunicorn's --timeout."""
+
+    def test_fetch_timeout_at_the_worker_budget_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='60',
+        )
+        app = create_app(cfg)
+        argv = ['/usr/bin/gunicorn', 'app:create_app()', '--timeout', '60']
+        with pytest.raises(RuntimeError, match='API_FETCH_TIMEOUT is 60s'):
+            check_fetch_timeout_headroom(app, argv=argv)
+
+    def test_fetch_timeout_above_the_worker_budget_raises(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='90',
+        )
+        app = create_app(cfg)
+        with pytest.raises(RuntimeError, match='--timeout 60s'):
+            check_fetch_timeout_headroom(app, argv=['gunicorn', '--timeout=60'])
+
+    def test_headroom_is_accepted(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='30',
+        )
+        app = create_app(cfg)
+        check_fetch_timeout_headroom(app, argv=['gunicorn', '--timeout', '60'])
+
+    def test_outside_production_it_warns_instead_of_raising(self, fresh_config, caplog):
+        cfg = fresh_config(API_FETCH_TIMEOUT='60')
+        app = create_app(cfg)
+        with caplog.at_level(logging.WARNING):
+            check_fetch_timeout_headroom(app, argv=['gunicorn', '--timeout', '60'])
+        assert 'API_FETCH_TIMEOUT is 60s' in caplog.text
+
+    def test_non_gunicorn_argv_is_ignored(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='600',
+        )
+        app = create_app(cfg)
+        # The dev server has no worker to be killed by, and pytest's own flags
+        # must not be read as a gunicorn timeout.
+        check_fetch_timeout_headroom(app, argv=['pytest', '--timeout', '5'])
+
+    def test_worker_timeout_parsing(self):
+        assert worker_timeout_from_start_command(['gunicorn', '--timeout', '45']) == 45
+        assert worker_timeout_from_start_command(['gunicorn', '-t', '90']) == 90
+        assert worker_timeout_from_start_command(['/x/gunicorn', '--timeout=30']) == 30
+        assert worker_timeout_from_start_command(['gunicorn', '--bind', ':80']) is None
+        assert worker_timeout_from_start_command(['gunicorn', '--timeout', 'x']) is None
+        assert worker_timeout_from_start_command([]) is None
 
 
 class TestProcessResponseShape:
