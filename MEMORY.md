@@ -31,7 +31,7 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 
 **What:** The app must never persist user-submitted JSON to disk, database, or any external system. The only writes are stdout logs (and those deliberately omit payloads).
 **Why:** Designed as an internal tool for handling potentially sensitive payloads (API responses, exports). The Render free tier deliberately has no persistent disk to enforce this physically.
-**How to apply:** Reject any change that adds a DB driver, file write of payload bytes, third-party analytics, or request-body logging. `logger.warning("API request failed: %s", e)` is fine; `logger.warning("payload was: %s", body)` is not.
+**How to apply:** Reject any change that adds a DB driver, file write of payload bytes, third-party analytics, or request-body logging. Log **fixed strings**: `logger.warning('API request failed')` is fine; interpolating the payload, the URL, or the exception is not — `requests`' exception text embeds the full URL, which can carry a token (see the 2026-08-21 log-hygiene entry).
 
 ### 2026-05-12 — Gunicorn must call the factory, not a module-level `app`  (area: deploy)
 
@@ -63,10 +63,10 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 **Why:** All state-changing routes accept browser form posts, so CSRF is mandatory. Disabling it in tests keeps fixtures simple — production behavior is exercised manually and via the security headers test.
 **How to apply:** When adding a route that mutates state or returns sensitive data, it inherits CSRF protection automatically. Don't add `@csrf.exempt` without justification. When testing CSRF behavior, do so in a dedicated test that flips `WTF_CSRF_ENABLED` back on.
 
-### 2026-05-12 — Multi-array JSON triggers a path-selector handshake  (area: backend / ux)
+### 2026-05-12 — Unselected JSON triggers the tree-picker handshake  (area: backend / ux)
 
-**What:** `/process` returns `{"needs_selection": true, "candidates": [...]}` (HTTP 200) when `find_candidate_arrays` reports more than one array of objects in the payload. The frontend opens a modal; the user picks; the request is re-submitted with `json_path` set to the chosen dotted path.
-**Why:** The original heuristic (`extract_table_data`) silently picked the first array it found, which surfaced the wrong data for nested API responses. Returning candidates is more honest than guessing.
+**What:** `/process` returns `{"needs_selection": true, "raw_json": <document>}` (HTTP 200) whenever no `json_path` was supplied. The frontend renders a JSON **tree picker** over `raw_json`; the user clicks any array or object node; the request is re-submitted with `json_path` set to the chosen dotted path.
+**Why:** The original heuristic (`extract_table_data`) silently picked the first array it found, which surfaced the wrong data for nested API responses. Handing the client the document and letting the user point at a node is more honest than guessing — and unlike the earlier `candidates` list it can reach any level, not just arrays of objects.
 **How to apply:** Don't "fix" the heuristic by being smarter — the selection prompt *is* the fix. The sentinel `'(root)'` is used when the top-level value is itself a list.
 
 ### 2026-05-12 — `flatten_for_csv` has a recursion-depth cap  (area: backend)
@@ -101,9 +101,102 @@ Keep entries short — if it grows past ~10 lines, it probably belongs in `READM
 
 ### 2026-05-12 — Pinned dependencies are deliberate  (area: deploy)
 
-**What:** `requirements.txt` uses exact `==` pins (Flask 3.0.0, requests 2.31.0, gunicorn 21.2.0, Flask-WTF 1.2.1, Flask-Limiter 3.5.0, pytest 7.4.4, openpyxl 3.1.2).
+**What:** `requirements.txt` uses exact `==` pins (Flask 3.1.3, requests 2.33.0, gunicorn 22.0.0, Flask-WTF 1.2.1, Flask-Limiter 3.5.0, openpyxl 3.1.5). Test tooling lives in `requirements-dev.txt`, and the optional Redis client in `requirements-redis.txt`.
 **Why:** Render auto-deploys on push. Loose pins + auto-deploy = surprise breakage. Exact pins keep deploys reproducible and make security audits possible.
 **How to apply:** Bump versions intentionally in a dedicated commit, run the full test suite, and verify the Render build before merging. Don't bump on a feature commit "while we're in here".
+
+### 2026-08-21 — Spreadsheet exports are formula-sanitized; JSONL and Markdown are not  (area: security)
+
+**What:** Values starting with `=`, `+`, `-`, `@`, tab, CR or LF are formula triggers (CWE-1236). CSV/TSV prefix them with a single quote; XLSX instead pins the cell's `data_type` to `'s'`, because openpyxl serializes a leading `=` as a *formula cell* and Excel then runs it without the CSV warning. JSONL and Markdown exports are deliberately exempt.
+**Why:** The tool's whole job is turning untrusted API/file JSON into spreadsheets, so an attacker who controls a cell controls the exported file's formulas. The exemptions are not oversights: JSON carries types and nothing evaluates it, so a quote prefix would corrupt data while protecting nothing; Markdown does not evaluate `=` either, but an unescaped pipe or newline breaks the table, so it gets Markdown-specific escaping.
+**How to apply:** Any new **spreadsheet-compatible** export must route cells through `helpers.sanitize_cell` (or pin the data type, for typed formats). Any new **non-spreadsheet** format (JSONL, Markdown, ...) must not. There are four sanitized paths today — two server routes plus the client CSV and TSV builders — and `tests/js/test_export_sanitize.mjs` exists so none of them can regress silently.
+
+### 2026-08-21 — The API-fetch failure log is a fixed string  (area: security)
+
+**What:** `logger.warning('API request failed')` — no interpolation, ever.
+**Why:** `requests`' exception text embeds the full URL. With query-param auth the token rides in that URL, so the old `'API request failed: %s'` wrote secrets to stdout. Query strings, fragments, userinfo **and paths** can all carry tokens, so a redaction helper that preserves the path is not sufficient.
+**How to apply:** Never add the URL, the exception, or any request field to a log line on this path. `caplog` tests assert no URL component reaches the logs; keep them passing.
+
+**Owner / source:** security review F3/F9.
+
+### 2026-08-21 — DNS is bounded in *concurrency*, not in execution  (area: security / performance)
+
+**What:** Lookups run on a shared, fixed-size `ThreadPoolExecutor` created lazily inside the worker (it records its pid, so a pool inherited across a fork is replaced). The admission permit is taken *before* `submit` and released from the future's **done-callback**, never from the caller's `finally`.
+**Why:** `getaddrinfo` takes no timeout and cannot be cancelled. `API_DNS_TIMEOUT` bounds only how long the *request* waits; the lookup keeps running. Releasing the permit on caller timeout would re-admit work into an already-blocked pool, which is exactly how it saturates under repeated slow-DNS requests. **Teardown is not bounded by anything this code controls** — glibc's defaults are ~5s per nameserver × 2 attempts × every nameserver in `resolv.conf`, so tens of seconds is the realistic worst case.
+**How to apply:** Do **not** describe teardown as bounded in any doc, comment or test. Assert the caller wait and the admission error instead. `options timeout:2 attempts:1` in the container's `resolv.conf` is a best-effort narrowing; a killable subprocess resolver is the only real bound and is not in v1.2.
+
+**Owner / source:** security review F6.1, performance review P7.
+
+### 2026-08-21 — `APP_ENV=production` is the only production signal  (area: deploy / security)
+
+**What:** One env var, read through one helper (`config.is_production()`), gating the SECRET_KEY fail-fast, `SESSION_COOKIE_SECURE`, and the rate-limit topology guard.
+**Why:** Two accepted spellings let a deployment satisfy one gate and silently miss another — e.g. passing the secret-key check with `Secure` cookies still off, a live vulnerability produced purely by the inconsistency. And production is never inferred from `not DEBUG`: the documented local run `python app.py` has `DEBUG=False`, so that would block ordinary development.
+**How to apply:** New production-only behavior calls `is_production()`. Never add `PRODUCTION=true`, `ENV=prod`, or any alias — a test asserts `PRODUCTION=true` alone is *not* honored.
+
+**Owner / source:** security review F7/F16.
+
+### 2026-08-21 — `memory://` rate-limit counters multiply by workers × replicas  (area: deploy)
+
+**What:** The default storage is process-local, so N workers on M instances enforce N×M times the configured limit. `RATELIMIT_STORAGE_URI` is configurable (it was hardcoded before v1.2). Under `APP_ENV=production` the app refuses to start unless `WEB_CONCURRENCY` and `APP_REPLICAS` are declared, the start command's `--workers` agrees with `WEB_CONCURRENCY`, and storage is shared whenever either count exceeds one.
+**Why:** Defaults of 1 fail *open* — an undeclared 4-worker deployment reads as single-worker, which is exactly where the guard matters most. `WEB_CONCURRENCY` is the single source of truth because gunicorn reads it natively, so the number the app validates cannot drift from the number gunicorn runs.
+**How to apply:** To run more than one worker or instance: install `requirements-redis.txt`, set `RATELIMIT_STORAGE_URI=redis://…`, then raise the counts. Never write a bare `--workers N` into a start command — derive it from `$WEB_CONCURRENCY`. `APP_REPLICAS` must mirror `render.yaml`'s `numInstances`.
+
+**Owner / source:** security review F12, roadmap 2.10.
+
+### 2026-08-21 — API fetch is restricted to ports 80, 443 and 8443  (area: security)
+
+**What:** `API_ALLOWED_PORTS` (default `80,443,8443`), checked before DNS so a rejected URL costs no lookup. An empty value disables the check.
+**Why:** Only the resolved IP was validated, so `http://public.example.com:22` or `:6379` passed and the tool would connect to any port on any public host.
+**How to apply:** Widen the list via env rather than in code, and keep the check ahead of resolution.
+
+**Owner / source:** security review F6.2, decision D5.
+
+### 2026-08-21 — The XLSX export budget is measured, in cells, and on by default  (area: performance)
+
+**What:** `MAX_EXPORT_CELLS` (default 250,000) caps Excel exports only. CSV/TSV are generator-streamed and stay uncapped.
+**Why:** openpyxl memory tracks `rows × columns`, not rows — at equal cell counts a narrow, tall sheet costs *more* (84.3 MiB at 50k×3 vs 73.6 at 15k×10), so a row limit says almost nothing about the footprint. The default comes from the measurement in `docs/export-budget-v1.2.md`, not from feel. An unlimited default would leave a High finding unmitigated; uncapped CSV/TSV is what keeps the export contract as wide as the input contract.
+**How to apply:** Re-derive the number whenever the measurement is re-run — do not round it to something tidy. Never truncate an oversized export: `/process` advertises `total_cells`/`max_export_cells` so the client greys Excel out beforehand, and `/export-xlsx` returns 400 for direct callers. And keep exports diskless: openpyxl's `write_only` mode writes worksheet parts to OS temp files, and `SpooledTemporaryFile` is either pointless (its default `max_size=0` never rolls over) or disk-backed.
+
+**Owner / source:** performance review P3, decision D6.
+
+### 2026-08-21 — gunicorn's `--timeout` must exceed `API_FETCH_TIMEOUT`  (area: deploy)
+
+**What:** Every documented invocation sets `--timeout 60` against a default `API_FETCH_TIMEOUT` of 30s.
+**Why:** gunicorn's default timeout is also 30s, so a slow API fetch raced the worker kill: the worker was SIGKILLed mid-response and the client saw a 502 instead of the timeout message.
+**How to apply:** If you raise `API_FETCH_TIMEOUT`, raise `--timeout` with it — roughly double is the documented margin.
+
+**Owner / source:** performance review P9.
+
+### 2026-08-21 — The preview is a truncated copy; exports are not  (area: backend)
+
+**What:** `helpers.preview_truncate` builds a *new* row capping long strings, nested objects and nested arrays. `table_data` and `csv_data` are never mutated.
+**Why:** Preview rows used to carry full-fidelity nested structures, so a 50k-key object or a 5 MB string cell froze the tab. Truncating in place would have silently corrupted every export.
+**How to apply:** Anything that trims data for display must build a projection. Tests assert the server CSV and XLSX exports still contain the untruncated values — keep them.
+
+**Owner / source:** performance review P2.2/P5.
+
+
+---
+
+### 2026-08-22 — `routes.py` must never import `app.py`  (area: backend)
+
+**What:** Shared utilities go in `helpers.py` (or another leaf module), never in `app.py`. `helpers.format_size` is there for exactly this reason.
+**Why:** `create_app()` imports `bp` from `routes.py`, so a module-level `from app import ...` in `routes.py` makes `import routes` re-enter a half-initialized module and raise `ImportError`. It hid for a while because gunicorn's `app:create_app()` imports app-first, which happens to work — only routes-first entry points broke.
+**How to apply:** `TestNoImportCycle` in `tests/test_routes.py` imports each module first in a fresh subprocess and AST-checks that `routes.py` does not import `app`. If you need something from `app.py` in a route, move it down, don't import up.
+
+**Owner / source:** CodeRabbit review on the v1.2.0 PR.
+
+
+---
+
+### 2026-08-22 — A blank element in an integer-list env var is an error, not a default  (area: deploy / security)
+
+**What:** `config.env_int_set` rejects `80,,443`, `80,443,` and a lone `,`. Only an *unset* variable selects the default; only a fully empty value disables the check.
+**Why:** `security.validate_url` reads an empty allowlist as "no port restriction". Skipping blank elements meant `API_ALLOWED_PORTS=,` silently removed the outbound port restriction, and `80,,443` silently narrowed it — both from a typo, with no startup error.
+**How to apply:** Any list-valued setting whose empty state weakens a check must fail loudly on a malformed element. Never `if part.strip()` your way past bad input in a security setting.
+
+**Owner / source:** CodeRabbit review on the v1.2.0 PR.
+
 
 ---
 

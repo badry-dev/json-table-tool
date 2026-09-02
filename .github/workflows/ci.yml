@@ -1,0 +1,88 @@
+name: CI
+
+# Every commit is covered exactly once: a branch commit by its pull_request run,
+# a main commit by its push run.
+#
+# `push: ["**"]` alongside `pull_request` ran BOTH on every push to a PR branch.
+# The concurrency group below collapsed that pair, but collapsing means one of
+# the two is cancelled -- and GitHub attaches a cancelled check run to the head
+# commit, where it is not a success. So the PR reported `mergeable_state:
+# unstable` on every push even with CI fully green, which is indistinguishable
+# at a glance from a real failure. Not generating the duplicate beats cancelling
+# it.
+#
+# The trade-off: a branch with no pull request open gets no CI. That is the
+# intended shape -- the checks exist to gate the merge, and opening the PR is
+# what starts them.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+# Nothing here touches the GitHub API beyond checkout, so the token needs no
+# write scope; an explicit block also stops it inheriting wider repo defaults.
+permissions:
+  contents: read
+
+# Supersede a branch's own earlier run when a new commit lands on it: pushing
+# three times in a minute should not leave three runs competing for runners to
+# report on commits nobody is waiting for any more.
+#
+# This cancels only runs for SUPERSEDED commits, never the current head's --
+# the `on:` block above is what guarantees one run per commit, so there is no
+# same-SHA pair left to collapse. A cancelled check run lands on the old commit,
+# which is why this no longer costs the head commit its green state.
+#
+# The branch name alone is not unique across repositories: two pull requests
+# opened from different forks on a branch both named `feature` would share a
+# group, and cancel-in-progress would have them kill each other's checks. Keying
+# on the source repo keeps forks apart. head_ref is the source branch on a
+# pull_request and empty on a push; ref_name is the branch without the
+# refs/heads/ prefix (github.ref would keep it).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nothing after this step talks to GitHub, so leaving the token in
+          # .git/config only widens what a compromised dependency can reach.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Tests
+        run: python -m pytest tests/ -v
+
+      - name: Client-side export assertions (F1)
+        run: node tests/js/test_export_sanitize.mjs
+
+      - name: Client-side render/cap assertions (P4/P5/P13)
+        run: node tests/js/test_render_caps.mjs
+
+      - name: Client-side feature assertions (Phase 4)
+        run: node tests/js/test_features.mjs
+
+      - name: Audit runtime dependencies
+        run: pip-audit -r requirements.txt

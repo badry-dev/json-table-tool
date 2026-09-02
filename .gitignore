@@ -19,6 +19,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Node (test assertions only; no build step)
+node_modules/
+
 # Project specific
 *.log
 .env

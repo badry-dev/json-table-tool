@@ -1,7 +1,33 @@
 """Tests for Flask routes."""
 
+import ast
+import csv
+import gzip
+import importlib
+import io
 import json
-from unittest.mock import patch, MagicMock
+import logging
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+from unittest.mock import MagicMock, patch
+
+import pytest
+from flask import Response, request
+
+import config as config_module
+from app import (
+    check_fetch_timeout_headroom,
+    check_rate_limit_topology,
+    create_app,
+    worker_count_from_start_command,
+    worker_timeout_from_start_command,
+)
+from extensions import client_ip_key
+from security import validate_url
 
 
 class TestIndexRoute:
@@ -29,11 +55,14 @@ class TestHealthRoute:
 
 class TestProcessRoute:
     def test_paste_valid_json(self, client):
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': '[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]',
-            'json_path': '(root)'
-        })
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': '[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]',
+                'json_path': '(root)',
+            },
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
@@ -41,54 +70,46 @@ class TestProcessRoute:
         assert 'name' in data['columns']
 
     def test_paste_invalid_json(self, client):
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': '{invalid json}'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': '{invalid json}'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'error' in data
 
     def test_paste_empty(self, client):
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': ''
-        })
+        response = client.post('/process', data={'input_method': 'paste', 'pasted_json': ''})
         assert response.status_code == 400
 
     def test_invalid_input_method(self, client):
-        response = client.post('/process', data={
-            'input_method': 'unknown'
-        })
+        response = client.post('/process', data={'input_method': 'unknown'})
         assert response.status_code == 400
 
     def test_nested_json_object(self, client):
-        nested = json.dumps({"data": [{"x": 1}, {"x": 2}]})
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': nested,
-            'json_path': 'data'
-        })
+        nested = json.dumps({'data': [{'x': 1}, {'x': 2}]})
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': nested, 'json_path': 'data'}
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
 
     def test_no_path_returns_tree_payload(self, client):
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': '[{"id": 1}, {"id": 2}]'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': '[{"id": 1}, {"id": 2}]'}
+        )
         data = json.loads(response.data)
         assert data.get('needs_selection') is True
-        assert data['raw_json'] == [{"id": 1}, {"id": 2}]
+        assert data['raw_json'] == [{'id': 1}, {'id': 2}]
 
     def test_file_upload(self, client):
         import io
-        json_content = json.dumps([{"a": 1}])
+
+        json_content = json.dumps([{'a': 1}])
         data = {
             'input_method': 'file',
             'json_path': '(root)',
-            'json_file': (io.BytesIO(json_content.encode()), 'test.json')
+            'json_file': (io.BytesIO(json_content.encode()), 'test.json'),
         }
         response = client.post('/process', data=data, content_type='multipart/form-data')
         result = json.loads(response.data)
@@ -96,24 +117,28 @@ class TestProcessRoute:
 
     def test_jsonl_paste(self, client):
         jsonl_content = '{"id": 1, "name": "Alice"}\n{"id": 2, "name": "Bob"}'
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': jsonl_content,
-            'data_format': 'jsonl',
-            'json_path': '(root)'
-        })
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': jsonl_content,
+                'data_format': 'jsonl',
+                'json_path': '(root)',
+            },
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
 
     def test_jsonl_file_upload(self, client):
         import io
+
         jsonl_content = '{"a": 1}\n{"a": 2}\n{"a": 3}'
         data = {
             'input_method': 'file',
             'data_format': 'jsonl',
             'json_path': '(root)',
-            'json_file': (io.BytesIO(jsonl_content.encode()), 'test.jsonl')
+            'json_file': (io.BytesIO(jsonl_content.encode()), 'test.jsonl'),
         }
         response = client.post('/process', data=data, content_type='multipart/form-data')
         result = json.loads(response.data)
@@ -122,12 +147,10 @@ class TestProcessRoute:
 
     def test_preview_limit(self, client, app):
         app.config['PREVIEW_ROW_LIMIT'] = 5
-        rows = json.dumps([{"id": i} for i in range(20)])
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': rows,
-            'json_path': '(root)'
-        })
+        rows = json.dumps([{'id': i} for i in range(20)])
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': rows, 'json_path': '(root)'}
+        )
         data = json.loads(response.data)
         assert data['total_rows'] == 20
         assert len(data['preview']) == 5
@@ -135,12 +158,12 @@ class TestProcessRoute:
 
 class TestExportCsvRoute:
     def test_export_valid_data(self, client):
-        response = client.post('/export-csv',
-            data=json.dumps({
-                'csv_data': [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}],
-                'csv_columns': ['a', 'b']
-            }),
-            content_type='application/json'
+        response = client.post(
+            '/export-csv',
+            data=json.dumps(
+                {'csv_data': [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}], 'csv_columns': ['a', 'b']}
+            ),
+            content_type='application/json',
         )
         assert response.status_code == 200
         assert response.content_type.startswith('text/csv')
@@ -148,99 +171,109 @@ class TestExportCsvRoute:
         assert 'a,b' in csv_text
 
     def test_export_empty_data(self, client):
-        response = client.post('/export-csv',
-            data=json.dumps({
-                'csv_data': [],
-                'csv_columns': []
-            }),
-            content_type='application/json'
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [], 'csv_columns': []}),
+            content_type='application/json',
+        )
+        assert response.status_code == 400
+
+    def test_non_dict_row_is_rejected_before_the_stream_starts(self, client):
+        # _stream_csv calls row.get(), and the generator body runs after the
+        # headers are already on the wire -- so without an up-front check this
+        # returned 200 and then raised AttributeError mid-body, leaving the
+        # client with a truncated file it had no way to recognize as an error.
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': ['x'], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 400
+        assert response.get_json()['error'] == 'csv_data must be a list of objects'
+        # Reading the body must not raise: nothing was streamed.
+        assert b'AttributeError' not in response.get_data()
+
+    def test_a_non_dict_row_after_valid_rows_is_rejected(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': 1}, None], 'csv_columns': ['a']}),
+            content_type='application/json',
         )
         assert response.status_code == 400
 
 
 class TestExportXlsxRoute:
     def test_export_xlsx(self, client):
-        response = client.post('/export-xlsx',
-            data=json.dumps({
-                'csv_data': [{'a': 1, 'b': 2}],
-                'csv_columns': ['a', 'b']
-            }),
-            content_type='application/json'
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': 1, 'b': 2}], 'csv_columns': ['a', 'b']}),
+            content_type='application/json',
         )
         assert response.status_code == 200
         assert 'spreadsheetml' in response.content_type
 
     def test_export_xlsx_empty(self, client):
-        response = client.post('/export-xlsx',
+        response = client.post(
+            '/export-xlsx',
             data=json.dumps({'csv_data': [], 'csv_columns': []}),
-            content_type='application/json'
+            content_type='application/json',
         )
         assert response.status_code == 400
 
 
 class TestPathSelection:
     def test_no_path_returns_raw_json_for_tree(self, client):
-        payload = {"users": [{"n": "A"}], "orders": [{"id": 1}]}
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': json.dumps(payload)
-        })
+        payload = {'users': [{'n': 'A'}], 'orders': [{'id': 1}]}
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': json.dumps(payload)}
+        )
         data = json.loads(response.data)
         assert data.get('needs_selection') is True
         assert data['raw_json'] == payload
 
     def test_path_selection(self, client):
-        multi = json.dumps({"users": [{"n": "A"}], "orders": [{"id": 1}, {"id": 2}]})
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': multi,
-            'json_path': 'orders'
-        })
+        multi = json.dumps({'users': [{'n': 'A'}], 'orders': [{'id': 1}, {'id': 2}]})
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': multi, 'json_path': 'orders'}
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
 
     def test_path_to_array_index_object(self, client):
-        payload = json.dumps({"data": [{"id": 1, "orders": [{"x": 1}, {"x": 2}]}]})
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': payload,
-            'json_path': 'data.0.orders'
-        })
+        payload = json.dumps({'data': [{'id': 1, 'orders': [{'x': 1}, {'x': 2}]}]})
+        response = client.post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'data.0.orders'},
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
 
     def test_path_to_single_object_becomes_one_row(self, client):
-        payload = json.dumps({"meta": {"version": 3, "name": "x"}})
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': payload,
-            'json_path': 'meta'
-        })
+        payload = json.dumps({'meta': {'version': 3, 'name': 'x'}})
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'meta'}
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 1
         assert 'version' in data['columns']
 
     def test_path_to_primitive_rejected(self, client):
-        payload = json.dumps({"a": 1})
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': payload,
-            'json_path': 'a'
-        })
+        payload = json.dumps({'a': 1})
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'a'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'primitive' in data['error']
 
     def test_invalid_path_rejected(self, client):
-        payload = json.dumps({"a": {"b": 1}})
-        response = client.post('/process', data={
-            'input_method': 'paste',
-            'pasted_json': payload,
-            'json_path': 'a.c'
-        })
+        payload = json.dumps({'a': {'b': 1}})
+        response = client.post(
+            '/process', data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'a.c'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'not found' in data['error']
@@ -253,6 +286,7 @@ class TestApiFetch:
         content = json.dumps(json_data).encode()
         mock_resp.iter_content.return_value = [content]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         return mock_resp
 
     @patch('routes.requests.get')
@@ -261,11 +295,14 @@ class TestApiFetch:
         mock_validate.return_value = (True, None)
         mock_get.return_value = self._mock_response([{'id': 1}, {'id': 2}])
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'https://api.example.com/data',
-            'json_path': '(root)'
-        })
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'json_path': '(root)',
+            },
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
@@ -277,13 +314,13 @@ class TestApiFetch:
     @patch('routes.validate_url')
     def test_api_fetch_timeout(self, mock_validate, mock_get, client):
         import requests as req
+
         mock_validate.return_value = (True, None)
         mock_get.side_effect = req.exceptions.Timeout('timed out')
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'https://api.example.com/data'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'api', 'api_url': 'https://api.example.com/data'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'timed out' in data['error'].lower()
@@ -296,12 +333,12 @@ class TestApiFetch:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'<html>not json</html>']
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'https://api.example.com/data'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'api', 'api_url': 'https://api.example.com/data'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'not valid JSON' in data['error']
@@ -315,24 +352,26 @@ class TestApiFetch:
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [b'x' * 200]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'https://api.example.com/data'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'api', 'api_url': 'https://api.example.com/data'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'exceeds maximum size' in data['error']
 
     @patch('routes.validate_url')
     def test_api_fetch_ssrf_blocked(self, mock_validate, client):
-        mock_validate.return_value = (False, 'URLs pointing to private or internal networks are not allowed')
+        mock_validate.return_value = (
+            False,
+            'URLs pointing to private or internal networks are not allowed',
+        )
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'http://169.254.169.254/metadata'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'api', 'api_url': 'http://169.254.169.254/metadata'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'private' in data['error'].lower()
@@ -346,14 +385,18 @@ class TestApiFetch:
         content = b'{"id": 1, "name": "Alice"}\n{"id": 2, "name": "Bob"}'
         mock_resp.iter_content.return_value = [content]
         mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
         mock_get.return_value = mock_resp
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'https://api.example.com/data',
-            'data_format': 'jsonl',
-            'json_path': '(root)'
-        })
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'data_format': 'jsonl',
+                'json_path': '(root)',
+            },
+        )
         data = json.loads(response.data)
         assert data['success'] is True
         assert data['total_rows'] == 2
@@ -362,15 +405,15 @@ class TestApiFetch:
     @patch('routes.validate_url')
     def test_api_fetch_request_error_no_leak(self, mock_validate, mock_get, client):
         import requests as req
+
         mock_validate.return_value = (True, None)
         mock_get.side_effect = req.exceptions.ConnectionError(
             'Connection to secret-internal-host:8080 refused'
         )
 
-        response = client.post('/process', data={
-            'input_method': 'api',
-            'api_url': 'https://api.example.com/data'
-        })
+        response = client.post(
+            '/process', data={'input_method': 'api', 'api_url': 'https://api.example.com/data'}
+        )
         assert response.status_code == 400
         data = json.loads(response.data)
         # Should NOT leak the internal connection details
@@ -381,12 +424,10 @@ class TestApiFetch:
 class TestFileUploadEncoding:
     def test_non_utf8_file_returns_400(self, client):
         import io
+
         # Latin-1 encoded content with bytes invalid in UTF-8
         content = b'\xff\xfe This is not valid UTF-8'
-        data = {
-            'input_method': 'file',
-            'json_file': (io.BytesIO(content), 'test.json')
-        }
+        data = {'input_method': 'file', 'json_file': (io.BytesIO(content), 'test.json')}
         response = client.post('/process', data=data, content_type='multipart/form-data')
         assert response.status_code == 400
         result = json.loads(response.data)
@@ -395,15 +436,13 @@ class TestFileUploadEncoding:
 
 class TestExportEdgeCases:
     def test_export_csv_no_json_body(self, client):
-        response = client.post('/export-csv', data='not json',
-                               content_type='application/json')
+        response = client.post('/export-csv', data='not json', content_type='application/json')
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'Invalid or missing' in data['error']
 
     def test_export_xlsx_no_json_body(self, client):
-        response = client.post('/export-xlsx', data='not json',
-                               content_type='application/json')
+        response = client.post('/export-xlsx', data='not json', content_type='application/json')
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'Invalid or missing' in data['error']
@@ -433,3 +472,1813 @@ class TestSecurityHeaders:
     def test_referrer_policy(self, client):
         response = client.get('/')
         assert 'strict-origin' in response.headers['Referrer-Policy']
+
+    def test_permissions_policy(self, client):
+        response = client.get('/')
+        policy = response.headers['Permissions-Policy']
+        assert 'camera=()' in policy
+        assert 'microphone=()' in policy
+        assert 'geolocation=()' in policy
+
+    def test_cross_origin_headers(self, client):
+        response = client.get('/')
+        assert response.headers['Cross-Origin-Opener-Policy'] == 'same-origin'
+        assert response.headers['Cross-Origin-Resource-Policy'] == 'same-origin'
+
+    def test_csp_hardening_directives(self, client):
+        directives = {
+            part.strip() for part in client.get('/').headers['Content-Security-Policy'].split(';')
+        }
+        assert "object-src 'none'" in directives
+        assert "base-uri 'self'" in directives
+        assert "frame-ancestors 'none'" in directives
+        assert "form-action 'self'" in directives
+        assert 'upgrade-insecure-requests' in directives
+
+    def test_csp_still_allows_google_fonts_and_data_images(self, client):
+        csp = client.get('/').headers['Content-Security-Policy']
+        assert 'https://fonts.googleapis.com' in csp
+        assert 'https://fonts.gstatic.com' in csp
+        assert 'data:' in csp
+
+    def test_csp_has_no_malformed_directive(self, client):
+        """A missing separator would fuse two directives into one token."""
+        csp = client.get('/').headers['Content-Security-Policy']
+        parts = [part.strip() for part in csp.split(';') if part.strip()]
+        assert len(parts) == len(set(parts))
+        for part in parts:
+            assert not part.startswith("'")
+            # Each directive starts with a bare directive name.
+            assert re.match(r'^[a-z-]+( |$)', part), part
+
+    def test_no_hsts_on_plain_http(self, client):
+        response = client.get('/')
+        assert 'Strict-Transport-Security' not in response.headers
+
+    def test_hsts_on_secure_request(self, client):
+        response = client.get('/', base_url='https://localhost')
+        assert response.headers['Strict-Transport-Security'] == (
+            'max-age=31536000; includeSubDomains'
+        )
+
+
+class TestFormulaInjection:
+    """F1 - CSV/XLSX formula injection (CWE-1236)."""
+
+    DANGEROUS = ['=SUM(A1)', '@cmd', '+1', '-1', '\tlead', '\rlead', '\nlead']
+
+    def test_csv_prefixes_every_trigger(self, client):
+        rows = [{'v': value} for value in self.DANGEROUS]
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': rows, 'csv_columns': ['v']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        emitted = [row[0] for row in parsed[1:]]
+        assert emitted == ["'" + value for value in self.DANGEROUS]
+
+    def test_csv_leaves_safe_values_alone(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps(
+                {
+                    'csv_data': [{'a': 'plain', 'b': 5, 'c': 'user@example.com'}],
+                    'csv_columns': ['a', 'b', 'c'],
+                }
+            ),
+            content_type='application/json',
+        )
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        assert parsed[1] == ['plain', '5', 'user@example.com']
+
+    def test_csv_sanitizes_column_headers(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'=EVIL()': 1}], 'csv_columns': ['=EVIL()']}),
+            content_type='application/json',
+        )
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        assert parsed[0] == ["'=EVIL()"]
+
+    def test_csv_serializes_containers(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': {'k': 'v'}}], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        parsed = list(csv.reader(io.StringIO(response.data.decode('utf-8'))))
+        assert parsed[1] == ['{"k": "v"}']
+
+    def test_xlsx_writes_triggers_as_string_cells(self, client):
+        from openpyxl import load_workbook
+
+        rows = [{'v': value} for value in self.DANGEROUS]
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': rows, 'csv_columns': ['v']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+        ws = load_workbook(io.BytesIO(response.data)).active
+        for index, value in enumerate(self.DANGEROUS, start=2):
+            cell = ws.cell(row=index, column=1)
+            assert cell.data_type == 's', f'{value!r} was written as {cell.data_type}'
+            # XLSX carries an explicit type, so the text itself stays intact.
+            assert cell.value == value.replace('\r', '\n')
+
+    def test_xlsx_sanitizes_column_headers(self, client):
+        from openpyxl import load_workbook
+
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'=EVIL()': 1}], 'csv_columns': ['=EVIL()']}),
+            content_type='application/json',
+        )
+        ws = load_workbook(io.BytesIO(response.data)).active
+        assert ws.cell(row=1, column=1).data_type == 's'
+
+    def test_xlsx_keeps_numbers_numeric(self, client):
+        from openpyxl import load_workbook
+
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': -1, 'b': 2.5}], 'csv_columns': ['a', 'b']}),
+            content_type='application/json',
+        )
+        ws = load_workbook(io.BytesIO(response.data)).active
+        assert ws.cell(row=2, column=1).value == -1
+        assert ws.cell(row=2, column=2).value == 2.5
+
+
+class TestApiFetchLogHygiene:
+    """F3/F9 - no URL component or token may reach the logs."""
+
+    SECRET = 'sup3rs3cr3t-token'
+
+    def _post(self, client, url, **extra):
+        data = {'input_method': 'api', 'api_url': url}
+        data.update(extra)
+        return client.post('/process', data=data)
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_token_in_query_string_never_logged(self, mock_validate, mock_get, client, caplog):
+        import requests as req
+
+        mock_validate.return_value = (True, None)
+        url = f'https://api.example.com/data?api_key={self.SECRET}'
+        # requests puts the whole URL in the exception message.
+        mock_get.side_effect = req.exceptions.ConnectionError(
+            f"HTTPSConnectionPool(host='api.example.com', port=443): "
+            f'Max retries exceeded with url: /data?api_key={self.SECRET}'
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            response = self._post(client, url)
+
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API request failed'
+
+        logged = '\n'.join(record.getMessage() for record in caplog.records)
+        assert self.SECRET not in logged
+        assert 'api.example.com' not in logged
+        assert '/data' not in logged
+        assert 'API request failed' in logged
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_token_in_path_never_logged(self, mock_validate, mock_get, client, caplog):
+        import requests as req
+
+        mock_validate.return_value = (True, None)
+        url = f'https://api.example.com/v1/{self.SECRET}/data'
+        mock_get.side_effect = req.exceptions.ConnectionError(
+            f'Failed to establish a new connection to /v1/{self.SECRET}/data'
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            response = self._post(client, url)
+
+        assert response.status_code == 400
+        logged = '\n'.join(record.getMessage() for record in caplog.records)
+        assert self.SECRET not in logged
+        assert 'v1' not in logged
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_query_param_auth_value_never_logged(self, mock_validate, mock_get, client, caplog):
+        import requests as req
+
+        mock_validate.return_value = (True, None)
+        mock_get.side_effect = req.exceptions.ConnectionError('boom')
+
+        with caplog.at_level(logging.DEBUG):
+            response = self._post(
+                client,
+                'https://api.example.com/data',
+                auth_method='query_param',
+                query_param_name='api_key',
+                query_param_value=self.SECRET,
+            )
+
+        assert response.status_code == 400
+        assert self.SECRET not in '\n'.join(r.getMessage() for r in caplog.records)
+
+
+class TestApiFetchJsonlErrors:
+    """F9 - a malformed JSONL body from the API is a 400, not a logged 500."""
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_malformed_jsonl_returns_400(self, mock_validate, mock_get, client, caplog):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'{"a": 1}\n{bad json}\n']
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        with caplog.at_level(logging.DEBUG):
+            response = client.post(
+                '/process',
+                data={
+                    'input_method': 'api',
+                    'api_url': 'https://api.example.com/data',
+                    'data_format': 'jsonl',
+                },
+            )
+
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response is not valid JSONL'
+
+        logged = '\n'.join(record.getMessage() for record in caplog.records)
+        assert 'Unexpected error' not in logged
+        assert 'bad json' not in logged
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+class TestOutboundHeaderAllowlist:
+    """F4 - the client supplies the outbound header NAME; only an allowlist passes."""
+
+    REJECTED = [
+        'Host',
+        'host',
+        'HOST',
+        'Content-Length',
+        'Transfer-Encoding',
+        'Connection',
+        'CoNnEcTiOn',
+        'Proxy-Authorization',
+        'PROXY-AUTHORIZATION',
+        'Cookie',
+        'X-CSRF-Token',
+        ' Host ',
+        'Host\t',
+        'X Api Key',
+        'X-Api-Key:',
+        '',
+    ]
+
+    def _fetch(self, client, header_name):
+        return client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'auth_method': 'api_key',
+                'api_key_header': header_name,
+                'api_key': 'secret',
+                'json_path': '(root)',
+            },
+        )
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_reserved_and_hop_by_hop_names_rejected(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+
+        for name in self.REJECTED:
+            response = self._fetch(client, name)
+            assert response.status_code == 400, f'{name!r} was accepted'
+            assert 'not permitted' in json.loads(response.data)['error']
+
+        # Nothing was ever sent upstream.
+        assert mock_get.call_count == 0
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_permitted_header_in_unusual_case_is_forwarded(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'[{"id": 1}]']
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        response = self._fetch(client, '  x-API-kEy  ')
+        assert json.loads(response.data)['success'] is True
+
+        _, kwargs = mock_get.call_args
+        assert kwargs['headers'] == {'x-API-kEy': 'secret'}
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_default_header_still_works(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'[{"id": 1}]']
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        response = self._fetch(client, 'X-API-Key')
+        assert json.loads(response.data)['success'] is True
+        _, kwargs = mock_get.call_args
+        assert kwargs['headers'] == {'X-API-Key': 'secret'}
+
+
+@pytest.fixture
+def fresh_config(monkeypatch):
+    """
+    Rebuild config.Config from the current environment.
+
+    Config holds class attributes evaluated at import time, so a monkeypatched
+    env var only takes effect after a reload. F7 rules out constructing
+    Config(...) -- it is a class, not a constructor.
+    """
+
+    def build(**env):
+        for name, value in env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        return importlib.reload(config_module).Config
+
+    yield build
+    # Leave the module holding the pristine values for every later test.
+    monkeypatch.undo()
+    importlib.reload(config_module)
+
+
+class TestProductionSecretKey:
+    """F7 - the dev SECRET_KEY must not survive into production."""
+
+    def test_production_with_default_key_refuses_to_start(self, fresh_config):
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY=None)
+        with pytest.raises(RuntimeError, match='SECRET_KEY must be set'):
+            create_app(cfg)
+
+    def test_production_with_empty_key_refuses_to_start(self, fresh_config):
+        # A misconfigured secrets manager produces '' rather than "unset".
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY='')
+        with pytest.raises(RuntimeError, match='SECRET_KEY must be set'):
+            create_app(cfg)
+
+    def test_production_with_real_key_starts(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='a-real-random-value',
+            # A production app must also declare its topology (2.10).
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+        )
+        app = create_app(cfg)
+        assert app.config['SECRET_KEY'] == 'a-real-random-value'
+
+    def test_local_run_with_default_key_starts(self, fresh_config):
+        # `python app.py` has DEBUG False, so gating on `not DEBUG` would have
+        # blocked the documented local run.
+        cfg = fresh_config(APP_ENV=None, SECRET_KEY=None, FLASK_DEBUG=None)
+        assert cfg.DEBUG is False
+        app = create_app(cfg)
+        assert app.config['SECRET_KEY'] == config_module.DEV_SECRET_KEY
+
+    def test_second_spelling_is_not_a_production_signal(self, fresh_config):
+        # Accepting PRODUCTION=true as well would let a deployment pass this gate
+        # while SESSION_COOKIE_SECURE (F16) stayed off.
+        cfg = fresh_config(APP_ENV=None, PRODUCTION='true', SECRET_KEY=None)
+        assert config_module.is_production() is False
+        create_app(cfg)
+
+    def test_app_env_is_case_and_space_insensitive(self, fresh_config):
+        fresh_config(APP_ENV='  Production  ')
+        assert config_module.is_production() is True
+
+
+class TestIntegerConfigValidation:
+    """F7 - a mistyped integer setting must name the variable, not raise ValueError."""
+
+    INT_SETTINGS = [
+        'MAX_UPLOAD_SIZE',
+        'PREVIEW_ROW_LIMIT',
+        'API_FETCH_TIMEOUT',
+        'API_FETCH_MAX_RESPONSE',
+        'FLATTEN_MAX_DEPTH',
+        'API_DNS_TIMEOUT',
+        'API_DNS_MAX_WORKERS',
+        'API_DNS_ADMISSION_TIMEOUT',
+    ]
+
+    def test_each_integer_setting_reports_a_clear_error(self, fresh_config):
+        for name in self.INT_SETTINGS:
+            with pytest.raises(RuntimeError, match=f'{name} must be an integer'):
+                fresh_config(**{name: 'abc'})
+            # Undo before the next iteration so errors do not stack.
+            fresh_config(**{name: None})
+
+    def test_blank_value_falls_back_to_the_default(self, fresh_config):
+        cfg = fresh_config(PREVIEW_ROW_LIMIT='   ')
+        assert cfg.PREVIEW_ROW_LIMIT == 25
+
+    def test_valid_value_is_applied(self, fresh_config):
+        cfg = fresh_config(PREVIEW_ROW_LIMIT=' 7 ')
+        assert cfg.PREVIEW_ROW_LIMIT == 7
+
+    def test_port_allowlist_reports_a_clear_error(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS must be a comma-separated'):
+            fresh_config(API_ALLOWED_PORTS='80,https')
+        fresh_config(API_ALLOWED_PORTS=None)
+
+    def test_port_allowlist_is_parsed(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS=' 80 , 8443 ')
+        assert sorted(cfg.API_ALLOWED_PORTS) == [80, 8443]
+
+
+class TestRecursionDepth:
+    """F8 - a pathologically nested document is a 400, never a 500."""
+
+    @staticmethod
+    def _deep_json(depth):
+        return '{"a":' * depth + '1' + '}' * depth
+
+    def test_deeply_nested_paste_returns_400(self, client, caplog):
+        with caplog.at_level(logging.DEBUG):
+            response = client.post(
+                '/process',
+                data={'input_method': 'paste', 'pasted_json': self._deep_json(1500)},
+            )
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'JSON nesting too deep'
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_deeply_nested_upload_returns_400(self, client):
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'file',
+                'json_file': (io.BytesIO(self._deep_json(1500).encode()), 'deep.json'),
+            },
+            content_type='multipart/form-data',
+        )
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'JSON nesting too deep'
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_deeply_nested_api_response_returns_400(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [self._deep_json(1500).encode()]
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        response = client.post(
+            '/process',
+            data={'input_method': 'api', 'api_url': 'https://api.example.com/data'},
+        )
+        assert response.status_code == 400
+
+    def test_moderately_nested_document_still_works(self, client):
+        payload = json.dumps({'rows': [{'id': 1}, {'id': 2}]})
+        response = client.post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': payload, 'json_path': 'rows'},
+        )
+        assert json.loads(response.data)['total_rows'] == 2
+
+
+class TestProxyAwareRateLimiting:
+    """F12 / D3 - X-Forwarded-For is honored only under TRUST_PROXY=1."""
+
+    @staticmethod
+    def _app_capturing_remote_addr(cfg):
+        app = create_app(cfg)
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+        seen = {}
+
+        @app.before_request
+        def _capture():
+            seen['remote_addr'] = request.remote_addr
+            seen['key'] = client_ip_key()
+            seen['is_secure'] = request.is_secure
+
+        return app, seen
+
+    def test_forwarded_for_ignored_by_default(self, fresh_config):
+        cfg = fresh_config(TRUST_PROXY=None)
+        app, seen = self._app_capturing_remote_addr(cfg)
+
+        app.test_client().get(
+            '/health',
+            headers={'X-Forwarded-For': '9.9.9.9', 'X-Forwarded-Proto': 'https'},
+            environ_base={'REMOTE_ADDR': '10.0.0.5'},
+        )
+
+        assert seen['remote_addr'] == '10.0.0.5'
+        assert seen['key'] == '10.0.0.5'
+        assert seen['is_secure'] is False
+
+    def test_forwarded_for_used_when_trusted(self, fresh_config):
+        cfg = fresh_config(TRUST_PROXY='1')
+        app, seen = self._app_capturing_remote_addr(cfg)
+
+        app.test_client().get(
+            '/health',
+            headers={'X-Forwarded-For': '9.9.9.9', 'X-Forwarded-Proto': 'https'},
+            environ_base={'REMOTE_ADDR': '10.0.0.5'},
+        )
+
+        assert seen['remote_addr'] == '9.9.9.9'
+        assert seen['key'] == '9.9.9.9'
+        # x_proto=1 also makes is_secure correct behind a TLS-terminating proxy,
+        # which HSTS (1.5) and the Secure cookie (1.14) depend on.
+        assert seen['is_secure'] is True
+
+    def test_only_one_hop_is_trusted(self, fresh_config):
+        """
+        A client that prepends its own hop must not choose its bucket.
+
+        With x_for=1 ProxyFix takes the LAST entry -- the hop our single trusted
+        proxy actually appended -- so the forged leading entry is ignored.
+        """
+        cfg = fresh_config(TRUST_PROXY='1')
+        app, seen = self._app_capturing_remote_addr(cfg)
+
+        app.test_client().get(
+            '/health',
+            headers={'X-Forwarded-For': '1.1.1.1, 2.2.2.2, 3.3.3.3'},
+            environ_base={'REMOTE_ADDR': '10.0.0.5'},
+        )
+
+        assert seen['remote_addr'] == '3.3.3.3'
+
+    def test_different_clients_get_different_buckets(self, fresh_config):
+        cfg = fresh_config(TRUST_PROXY='1')
+        app, seen = self._app_capturing_remote_addr(cfg)
+        client = app.test_client()
+
+        keys = []
+        for ip in ('9.9.9.9', '8.8.8.8'):
+            client.get(
+                '/health',
+                headers={'X-Forwarded-For': ip},
+                environ_base={'REMOTE_ADDR': '10.0.0.5'},
+            )
+            keys.append(seen['key'])
+
+        assert keys == ['9.9.9.9', '8.8.8.8']
+
+
+class TestJsonErrorHandlers:
+    """F10 - every error response is JSON, including the framework's own."""
+
+    def test_oversized_request_returns_json_413(self, fresh_config):
+        cfg = fresh_config(MAX_UPLOAD_SIZE=str(1024 * 1024))
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': 'x' * (2 * 1024 * 1024)},
+        )
+
+        assert response.status_code == 413
+        assert response.content_type.startswith('application/json')
+        assert json.loads(response.data)['error'] == 'Request too large (max 1MB)'
+
+    def test_unknown_route_returns_json_404(self, client):
+        response = client.get('/no-such-route')
+        assert response.status_code == 404
+        assert response.content_type.startswith('application/json')
+        assert 'error' in json.loads(response.data)
+
+    def test_internal_error_returns_json_500(self, fresh_config):
+        cfg = fresh_config()
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+        # TESTING would re-raise instead of routing to the handler.
+        app.config['PROPAGATE_EXCEPTIONS'] = False
+
+        @app.route('/boom')
+        def _boom():
+            raise RuntimeError('kaboom')
+
+        response = app.test_client().get('/boom')
+        assert response.status_code == 500
+        assert response.content_type.startswith('application/json')
+        assert json.loads(response.data)['error'] == 'An internal error occurred'
+        assert b'kaboom' not in response.data
+
+
+class TestNoStoreCacheControl:
+    """F11 - data-bearing responses must not be retained by any cache."""
+
+    def test_health_is_no_store(self, client):
+        assert client.get('/health').headers['Cache-Control'] == 'no-store'
+
+    def test_process_is_no_store(self, client):
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': '[{"a": 1}]',
+                'json_path': '(root)',
+            },
+        )
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_export_csv_is_no_store(self, client):
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': 1}], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_export_xlsx_is_no_store(self, client):
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': 1}], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.headers['Cache-Control'] == 'no-store'
+
+    def test_index_page_is_still_cacheable(self, client):
+        assert client.get('/').headers.get('Cache-Control') != 'no-store'
+
+
+class TestUploadValidation:
+    """F13 - the server, not just the file input's accept attribute."""
+
+    def _upload(self, client, filename, content_type=None, body=b'[{"a": 1}]'):
+        data = {
+            'input_method': 'file',
+            'json_path': '(root)',
+            'json_file': (io.BytesIO(body), filename, content_type)
+            if content_type is not None
+            else (io.BytesIO(body), filename),
+        }
+        return client.post('/process', data=data, content_type='multipart/form-data')
+
+    def test_rejects_unexpected_extensions(self, client):
+        for filename in ('evil.txt', 'evil.exe', 'evil', 'evil.json.png', 'evil.csv'):
+            response = self._upload(client, filename)
+            assert response.status_code == 400, filename
+            assert '.json or .jsonl' in json.loads(response.data)['error']
+
+    def test_rejects_unexpected_content_type(self, client):
+        response = self._upload(client, 'data.json', content_type='image/png')
+        assert response.status_code == 400
+        assert 'Unsupported content type' in json.loads(response.data)['error']
+
+    def test_accepts_json_and_jsonl(self, client):
+        assert json.loads(self._upload(client, 'data.json').data)['success'] is True
+        assert json.loads(self._upload(client, 'DATA.JSON').data)['success'] is True
+
+    def test_accepts_the_octet_stream_browsers_send_for_jsonl(self, client):
+        response = self._upload(
+            client,
+            'data.jsonl',
+            content_type='application/octet-stream',
+            body=b'{"a": 1}',
+        )
+        assert response.status_code == 200
+
+
+class TestCookieHardening:
+    """F16 - explicit cookie flags, Secure tied to APP_ENV=production."""
+
+    @staticmethod
+    def _set_cookie(app):
+        app.config['TESTING'] = True
+        # The index page calls csrf_token(), which writes to the session.
+        response = app.test_client().get('/', base_url='https://localhost')
+        return response.headers.get('Set-Cookie', '')
+
+    def test_local_run_flags(self, fresh_config):
+        cfg = fresh_config(APP_ENV=None)
+        assert cfg.SESSION_COOKIE_HTTPONLY is True
+        assert cfg.SESSION_COOKIE_SAMESITE == 'Lax'
+        assert cfg.SESSION_COOKIE_SECURE is False
+
+        cookie = self._set_cookie(create_app(cfg))
+        assert 'HttpOnly' in cookie
+        assert 'SameSite=Lax' in cookie
+        assert 'Secure' not in cookie
+
+    def test_production_sets_secure(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='a-real-random-value',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+        )
+        assert cfg.SESSION_COOKIE_SECURE is True
+
+        cookie = self._set_cookie(create_app(cfg))
+        assert 'Secure' in cookie
+        assert 'HttpOnly' in cookie
+        assert 'SameSite=Lax' in cookie
+
+
+class TestHealthVersionGate:
+    """F15 - version is returned by default; the gate only lets operators opt out."""
+
+    def test_version_present_by_default(self, fresh_config):
+        cfg = fresh_config(HEALTH_REVEAL_VERSION=None)
+        assert cfg.HEALTH_REVEAL_VERSION is True
+
+        app = create_app(cfg)
+        data = json.loads(app.test_client().get('/health').data)
+        assert data['status'] == 'ok'
+        assert data['version'] == cfg.APP_VERSION
+
+    def test_version_hidden_when_disabled(self, fresh_config):
+        cfg = fresh_config(HEALTH_REVEAL_VERSION='0')
+        assert cfg.HEALTH_REVEAL_VERSION is False
+
+        app = create_app(cfg)
+        data = json.loads(app.test_client().get('/health').data)
+        assert data == {'status': 'ok'}
+
+
+class TestGzipCompression:
+    """P1 - compress large text/JSON bodies, and nothing else."""
+
+    @staticmethod
+    def _big_payload(rows=400):
+        return json.dumps([{'id': i, 'name': f'user-{i}', 'note': 'x' * 60} for i in range(rows)])
+
+    def _process(self, client, **headers):
+        return client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': self._big_payload(),
+                'json_path': '(root)',
+            },
+            headers=headers,
+        )
+
+    def test_large_json_is_compressed(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'gzip, deflate'})
+
+        assert response.headers['Content-Encoding'] == 'gzip'
+        assert 'Accept-Encoding' in response.headers['Vary']
+
+        raw = response.get_data()
+        decompressed = gzip.decompress(raw)
+        assert json.loads(decompressed)['total_rows'] == 400
+        assert len(raw) < len(decompressed)
+        # Content-Length must describe what is actually on the wire.
+        assert int(response.headers['Content-Length']) == len(raw)
+
+    def test_not_compressed_without_accept_encoding(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'identity'})
+        assert 'Content-Encoding' not in response.headers
+        assert 'Accept-Encoding' in response.headers['Vary']
+        assert json.loads(response.data)['total_rows'] == 400
+
+    def test_explicit_gzip_refusal_is_honored(self, client):
+        # `gzip;q=0` names gzip only to reject it. A substring test on the raw
+        # header read that as permission and compressed anyway.
+        response = self._process(client, **{'Accept-Encoding': 'gzip;q=0'})
+        assert 'Content-Encoding' not in response.headers
+        assert json.loads(response.data)['total_rows'] == 400
+
+    def test_refusal_among_other_encodings_is_honored(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'br, gzip;q=0'})
+        assert 'Content-Encoding' not in response.headers
+
+    def test_positive_quality_still_compresses(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'gzip;q=0.5'})
+        assert response.headers['Content-Encoding'] == 'gzip'
+
+    def test_wildcard_accepts_gzip(self, client):
+        # RFC 9110 12.5.3: `*` matches any encoding not otherwise named.
+        response = self._process(client, **{'Accept-Encoding': '*'})
+        assert response.headers['Content-Encoding'] == 'gzip'
+
+    def test_small_response_is_not_compressed(self, client):
+        response = client.get('/health', headers={'Accept-Encoding': 'gzip'})
+        assert 'Content-Encoding' not in response.headers
+        assert json.loads(response.data)['status'] == 'ok'
+
+    def test_vary_is_not_duplicated(self, client):
+        response = self._process(client, **{'Accept-Encoding': 'gzip'})
+        varies = [v.strip().lower() for v in response.headers.get_all('Vary')]
+        assert varies.count('accept-encoding') == 1
+
+    def test_head_request_is_left_alone(self, client):
+        response = client.head('/', headers={'Accept-Encoding': 'gzip'})
+        assert 'Content-Encoding' not in response.headers
+
+    def test_already_encoded_body_is_left_alone(self, app):
+        app.config['PROPAGATE_EXCEPTIONS'] = False
+
+        @app.route('/pre-encoded')
+        def _pre_encoded():
+            payload = gzip.compress(b'{"already": "' + b'x' * 5000 + b'"}')
+            return Response(
+                payload,
+                mimetype='application/json',
+                headers={'Content-Encoding': 'gzip'},
+            )
+
+        response = app.test_client().get('/pre-encoded', headers={'Accept-Encoding': 'gzip'})
+        # Not double-compressed: one gzip layer decodes to the original JSON.
+        assert response.headers['Content-Encoding'] == 'gzip'
+        assert gzip.decompress(response.get_data()).startswith(b'{"already"')
+
+    def test_streamed_response_is_left_alone(self, app):
+        @app.route('/streamed')
+        def _streamed():
+            def generate():
+                for index in range(500):
+                    yield f'line {index} ' + 'y' * 40 + '\n'
+
+            return Response(generate(), mimetype='text/plain')
+
+        response = app.test_client().get('/streamed', headers={'Accept-Encoding': 'gzip'})
+        assert 'Content-Encoding' not in response.headers
+        assert response.get_data().startswith(b'line 0 ')
+
+    def test_binary_export_is_not_compressed(self, client):
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': 'x' * 100}] * 50, 'csv_columns': ['a']}),
+            content_type='application/json',
+            headers={'Accept-Encoding': 'gzip'},
+        )
+        # XLSX is a zip container; re-compressing it wastes CPU for nothing.
+        assert 'Content-Encoding' not in response.headers
+
+
+class TestStaticAssetCaching:
+    """P6 - static assets are cacheable, and their URLs are version-busted."""
+
+    def test_static_assets_carry_a_max_age(self, client):
+        response = client.get('/static/css/style.css')
+        assert response.status_code == 200
+        assert 'max-age=86400' in response.headers['Cache-Control']
+
+    def test_asset_urls_are_version_busted(self, client, app):
+        html = client.get('/').data.decode('utf-8')
+        version = app.config['APP_VERSION']
+        assert f'css/style.css?v={version}' in html
+        assert f'js/app.js?v={version}' in html
+
+    def test_max_age_is_configurable(self, fresh_config):
+        cfg = fresh_config(STATIC_MAX_AGE='60')
+        app = create_app(cfg)
+        response = app.test_client().get('/static/js/app.js')
+        assert 'max-age=60' in response.headers['Cache-Control']
+
+
+class TestStreamingCsvExport:
+    """P3 - CSV is generator-streamed and stays uncapped."""
+
+    def test_response_is_streamed(self, app):
+        client = app.test_client()
+        response = client.post(
+            '/export-csv',
+            data=json.dumps(
+                {
+                    'csv_data': [{'a': i, 'b': 'x' * 20} for i in range(2000)],
+                    'csv_columns': ['a', 'b'],
+                }
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+        # No Content-Length: the body is produced as it is written.
+        assert 'Content-Length' not in response.headers
+        rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+        assert rows[0] == ['a', 'b']
+        assert len(rows) == 2001
+
+    def test_csv_is_not_capped_by_the_xlsx_budget(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 10
+        response = app.test_client().post(
+            '/export-csv',
+            data=json.dumps({'csv_data': [{'a': i} for i in range(200)], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+        assert len(response.get_data(as_text=True).strip().splitlines()) == 201
+
+    def test_chunk_boundary_does_not_lose_or_duplicate_rows(self, app):
+        # Exercise exactly the flush boundary of CSV_STREAM_CHUNK_ROWS.
+        from routes import CSV_STREAM_CHUNK_ROWS
+
+        for count in (
+            CSV_STREAM_CHUNK_ROWS - 1,
+            CSV_STREAM_CHUNK_ROWS,
+            CSV_STREAM_CHUNK_ROWS + 1,
+        ):
+            response = app.test_client().post(
+                '/export-csv',
+                data=json.dumps(
+                    {'csv_data': [{'a': i} for i in range(count)], 'csv_columns': ['a']}
+                ),
+                content_type='application/json',
+            )
+            rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+            assert [r[0] for r in rows[1:]] == [str(i) for i in range(count)], count
+
+
+class TestXlsxExportBudget:
+    """P3 / D6 - the XLSX guard is on by default, budgeted in cells, never silent."""
+
+    def test_process_advertises_the_budget(self, client, app):
+        app.config['MAX_EXPORT_CELLS'] = 1000
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': json.dumps([{'a': i, 'b': i} for i in range(5)]),
+                'json_path': '(root)',
+            },
+        )
+        data = json.loads(response.data)
+        assert data['total_rows'] == 5
+        assert data['total_cells'] == 10
+        assert data['max_export_cells'] == 1000
+
+    def test_existing_keys_are_unchanged(self, client):
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'paste',
+                'pasted_json': '[{"a": 1}]',
+                'json_path': '(root)',
+            },
+        )
+        data = json.loads(response.data)
+        for key in ('success', 'columns', 'preview', 'total_rows', 'csv_data', 'csv_columns'):
+            assert key in data
+        assert data['total_rows'] == 1
+        assert data['columns'] == ['a']
+
+    def test_oversized_export_is_refused_not_truncated(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 10
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps(
+                {'csv_data': [{'a': i, 'b': i} for i in range(20)], 'csv_columns': ['a', 'b']}
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 400
+        error = json.loads(response.data)['error']
+        assert '40 cells' in error
+        assert 'limit of 10' in error
+        assert 'CSV or TSV' in error
+
+    def test_export_at_the_limit_succeeds(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 40
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps(
+                {'csv_data': [{'a': i, 'b': i} for i in range(20)], 'csv_columns': ['a', 'b']}
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+    def test_zero_disables_the_guard(self, app):
+        app.config['MAX_EXPORT_CELLS'] = 0
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': [{'a': i} for i in range(50)], 'csv_columns': ['a']}),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+
+    def test_guard_is_enabled_by_default(self, app):
+        assert app.config['MAX_EXPORT_CELLS'] > 0
+
+    def test_export_writes_no_files(self, app, tmp_path, monkeypatch):
+        """
+        D6 / AGENTS.md: no disk writes of payloads.
+
+        openpyxl's write_only mode and a rolled-over SpooledTemporaryFile both
+        put payload bytes in the OS temp directory. Point every temp mechanism at
+        an empty directory and assert nothing lands there.
+        """
+        for var in ('TMPDIR', 'TEMP', 'TMP'):
+            monkeypatch.setenv(var, str(tmp_path))
+        monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+
+        response = app.test_client().post(
+            '/export-xlsx',
+            data=json.dumps(
+                {
+                    'csv_data': [{'a': f'value-{i}', 'b': i} for i in range(3000)],
+                    'csv_columns': ['a', 'b'],
+                }
+            ),
+            content_type='application/json',
+        )
+        assert response.status_code == 200
+        assert len(response.get_data()) > 0
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestPreviewTruncationDoesNotAffectExports:
+    """P2.2 / P5 - the preview is capped; csv_data and exports are not."""
+
+    LONG = 'L' * 2000
+
+    def _process(self, client):
+        payload = json.dumps(
+            [{'text': self.LONG, 'items': list(range(100)), 'meta': {'a': self.LONG}}]
+        )
+        return json.loads(
+            client.post(
+                '/process',
+                data={
+                    'input_method': 'paste',
+                    'pasted_json': payload,
+                    'json_path': '(root)',
+                },
+            ).data
+        )
+
+    def test_preview_is_truncated(self, client):
+        preview = self._process(client)['preview'][0]
+        assert preview['text'].endswith('… (truncated)')
+        assert len(preview['text']) < len(self.LONG)
+        assert len(preview['items']) == 21
+
+    def test_csv_data_keeps_full_fidelity(self, client):
+        csv_data = self._process(client)['csv_data'][0]
+        assert csv_data['text'] == self.LONG
+        assert csv_data['meta.a'] == self.LONG
+        assert json.loads(csv_data['items']) == list(range(100))
+
+    def test_server_csv_export_is_untruncated(self, client):
+        data = self._process(client)
+        response = client.post(
+            '/export-csv',
+            data=json.dumps({'csv_data': data['csv_data'], 'csv_columns': data['csv_columns']}),
+            content_type='application/json',
+        )
+        rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
+        assert self.LONG in rows[1]
+        assert '… (truncated)' not in response.get_data(as_text=True)
+
+    def test_xlsx_export_is_untruncated(self, client):
+        from openpyxl import load_workbook
+
+        data = self._process(client)
+        response = client.post(
+            '/export-xlsx',
+            data=json.dumps({'csv_data': data['csv_data'], 'csv_columns': data['csv_columns']}),
+            content_type='application/json',
+        )
+        ws = load_workbook(io.BytesIO(response.data)).active
+        values = [cell.value for cell in ws[2]]
+        assert self.LONG in values
+
+
+class TestApiFetchDecodesWithoutAnExtraCopy:
+    """P12 - the streamed bytearray is decoded directly."""
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_bytearray_is_decoded_in_place(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # Several chunks, plus a multi-byte character split across none of them,
+        # to prove the accumulated bytearray is what gets decoded.
+        mock_resp.iter_content.return_value = [
+            b'[{"name": "Zo',
+            'ë'.encode(),
+            b'"}]',
+        ]
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        response = client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'json_path': '(root)',
+            },
+        )
+        data = json.loads(response.data)
+        assert data['success'] is True
+        assert data['csv_data'][0]['name'] == 'Zoë'
+
+
+class TestRateLimitTopologyGuard:
+    """
+    2.10 / F12 - memory:// counters are process-local, so the guard must fail
+    closed rather than let a multi-worker deployment silently enforce N x the
+    configured limit.
+    """
+
+    def test_memory_storage_counters_are_not_shared(self):
+        """
+        The multiplier is real, not theoretical.
+
+        Two limiter storages on memory:// do not see each other's hits, which is
+        exactly what happens across gunicorn workers and across replicas.
+        """
+        from limits.storage import storage_from_string
+
+        first = storage_from_string('memory://')
+        second = storage_from_string('memory://')
+
+        for _ in range(5):
+            first.incr('shared-key', 60)
+
+        assert first.get('shared-key') == 5
+        assert second.get('shared-key') == 0
+
+    def test_storage_uri_is_configurable_at_all(self, fresh_config):
+        # config.py hardcoded 'memory://' before v1.2, so no deployment could set
+        # shared storage even if it wanted to (2.10a).
+        cfg = fresh_config(RATELIMIT_STORAGE_URI='redis://localhost:6379/0')
+        assert cfg.RATELIMIT_STORAGE_URI == 'redis://localhost:6379/0'
+
+    def test_default_topology_starts_clean(self, fresh_config, caplog):
+        cfg = fresh_config(APP_ENV=None, WEB_CONCURRENCY=None, APP_REPLICAS=None)
+        with caplog.at_level(logging.WARNING):
+            create_app(cfg)
+        assert 'Rate-limit topology' not in caplog.text
+
+    def test_multi_worker_on_memory_storage_warns_outside_production(self, fresh_config, caplog):
+        cfg = fresh_config(APP_ENV=None, WEB_CONCURRENCY='4', APP_REPLICAS='1')
+        with caplog.at_level(logging.WARNING):
+            create_app(cfg)
+        assert 'process-local' in caplog.text
+        assert '4 x 1' in caplog.text
+
+    def test_multi_worker_on_memory_storage_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='4',
+            APP_REPLICAS='1',
+        )
+        with pytest.raises(RuntimeError, match='process-local'):
+            create_app(cfg)
+
+    def test_multi_replica_on_memory_storage_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='3',
+        )
+        with pytest.raises(RuntimeError, match='1 x 3'):
+            create_app(cfg)
+
+    def test_missing_declaration_raises_in_production(self, fresh_config):
+        cfg = fresh_config(APP_ENV='production', SECRET_KEY='k', WEB_CONCURRENCY=None)
+        with pytest.raises(RuntimeError, match='WEB_CONCURRENCY is not declared'):
+            create_app(cfg)
+
+    def test_missing_replica_declaration_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production', SECRET_KEY='k', WEB_CONCURRENCY='1', APP_REPLICAS=None
+        )
+        with pytest.raises(RuntimeError, match='APP_REPLICAS is not declared'):
+            create_app(cfg)
+
+    def test_shared_storage_allows_a_declared_multi_worker_topology(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='4',
+            APP_REPLICAS='2',
+            RATELIMIT_STORAGE_URI='redis://localhost:6379/0',
+        )
+        # Constructed, not connected: Flask-Limiter dials Redis lazily.
+        app = create_app(cfg)
+        assert app.config['RATELIMIT_STORAGE_URI'].startswith('redis://')
+
+    def test_start_command_contradicting_the_declaration_raises(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production', SECRET_KEY='k', WEB_CONCURRENCY='1', APP_REPLICAS='1'
+        )
+        app = create_app(cfg)
+        argv = ['/usr/bin/gunicorn', 'app:create_app()', '--workers', '4']
+        with pytest.raises(RuntimeError, match='start command runs --workers 4'):
+            check_rate_limit_topology(app, argv=argv)
+
+    def test_start_command_agreeing_with_the_declaration_is_fine(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='4',
+            APP_REPLICAS='1',
+            RATELIMIT_STORAGE_URI='redis://localhost:6379/0',
+        )
+        app = create_app(cfg)
+        check_rate_limit_topology(app, argv=['/usr/bin/gunicorn', '--workers=4'])
+
+    def test_non_gunicorn_argv_is_ignored(self, fresh_config):
+        cfg = fresh_config()
+        app = create_app(cfg)
+        # pytest's own -w-like flags must not be read as a worker declaration.
+        check_rate_limit_topology(app, argv=['pytest', '-w', '9'])
+
+    def test_worker_count_parsing(self):
+        assert worker_count_from_start_command(['gunicorn', '--workers', '3']) == 3
+        assert worker_count_from_start_command(['gunicorn', '-w', '2']) == 2
+        assert worker_count_from_start_command(['/x/gunicorn', '--workers=7']) == 7
+        assert worker_count_from_start_command(['gunicorn', '--bind', ':80']) is None
+        assert worker_count_from_start_command(['gunicorn', '--workers', 'x']) is None
+        assert worker_count_from_start_command([]) is None
+
+
+class TestFetchTimeoutHeadroom:
+    """P9 - API_FETCH_TIMEOUT must stay under gunicorn's --timeout."""
+
+    def test_fetch_timeout_at_the_worker_budget_raises_in_production(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='60',
+        )
+        app = create_app(cfg)
+        argv = ['/usr/bin/gunicorn', 'app:create_app()', '--timeout', '60']
+        with pytest.raises(RuntimeError, match='API_FETCH_TIMEOUT is 60s'):
+            check_fetch_timeout_headroom(app, argv=argv)
+
+    def test_fetch_timeout_above_the_worker_budget_raises(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='90',
+        )
+        app = create_app(cfg)
+        with pytest.raises(RuntimeError, match='--timeout 60s'):
+            check_fetch_timeout_headroom(app, argv=['gunicorn', '--timeout=60'])
+
+    def test_headroom_is_accepted(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='30',
+        )
+        app = create_app(cfg)
+        check_fetch_timeout_headroom(app, argv=['gunicorn', '--timeout', '60'])
+
+    def test_outside_production_it_warns_instead_of_raising(self, fresh_config, caplog):
+        cfg = fresh_config(API_FETCH_TIMEOUT='60')
+        app = create_app(cfg)
+        with caplog.at_level(logging.WARNING):
+            check_fetch_timeout_headroom(app, argv=['gunicorn', '--timeout', '60'])
+        assert 'API_FETCH_TIMEOUT is 60s' in caplog.text
+
+    def test_non_gunicorn_argv_is_ignored(self, fresh_config):
+        cfg = fresh_config(
+            APP_ENV='production',
+            SECRET_KEY='k',
+            WEB_CONCURRENCY='1',
+            APP_REPLICAS='1',
+            API_FETCH_TIMEOUT='600',
+        )
+        app = create_app(cfg)
+        # The dev server has no worker to be killed by, and pytest's own flags
+        # must not be read as a gunicorn timeout.
+        check_fetch_timeout_headroom(app, argv=['pytest', '--timeout', '5'])
+
+    def test_worker_timeout_parsing(self):
+        assert worker_timeout_from_start_command(['gunicorn', '--timeout', '45']) == 45
+        assert worker_timeout_from_start_command(['gunicorn', '-t', '90']) == 90
+        assert worker_timeout_from_start_command(['/x/gunicorn', '--timeout=30']) == 30
+        assert worker_timeout_from_start_command(['gunicorn', '--bind', ':80']) is None
+        assert worker_timeout_from_start_command(['gunicorn', '--timeout', 'x']) is None
+        assert worker_timeout_from_start_command([]) is None
+
+
+class TestProcessResponseShape:
+    """3.1-3.3 - the refactor is behavior-preserving and additive only."""
+
+    EXISTING_KEYS = {
+        'success': bool,
+        'columns': list,
+        'preview': list,
+        'total_rows': int,
+        'csv_data': list,
+        'csv_columns': list,
+    }
+
+    def _process(self, client, **extra):
+        data = {
+            'input_method': 'paste',
+            'pasted_json': json.dumps([{'b': 2, 'a': 1}, {'a': 3, 'c': 4}]),
+            'json_path': '(root)',
+        }
+        data.update(extra)
+        return json.loads(client.post('/process', data=data).data)
+
+    def test_no_existing_key_changed_name_type_or_meaning(self, client):
+        payload = self._process(client)
+        for key, expected_type in self.EXISTING_KEYS.items():
+            assert key in payload, key
+            assert isinstance(payload[key], expected_type), key
+
+        assert payload['total_rows'] == 2
+        assert payload['columns'] == ['a', 'b', 'c']
+        assert payload['csv_columns'] == ['a', 'b', 'c']
+        assert payload['csv_data'] == [{'b': 2, 'a': 1}, {'a': 3, 'c': 4}]
+
+    def test_preview_limit_is_returned(self, client, app):
+        app.config['PREVIEW_ROW_LIMIT'] = 7
+        payload = self._process(client)
+        assert payload['preview_limit'] == 7
+
+    def test_new_keys_are_the_only_additions(self, client):
+        payload = self._process(client)
+        added = set(payload) - set(self.EXISTING_KEYS)
+        assert added == {'preview_limit', 'total_cells', 'max_export_cells'}
+
+    def test_tree_picker_handshake_is_unchanged(self, client):
+        payload = json.loads(
+            client.post(
+                '/process',
+                data={'input_method': 'paste', 'pasted_json': '{"a": [{"x": 1}]}'},
+            ).data
+        )
+        assert payload == {'needs_selection': True, 'raw_json': {'a': [{'x': 1}]}}
+
+    def test_all_error_paths_still_return_their_messages(self, client):
+        cases = [
+            ({'input_method': 'unknown'}, 'Invalid input method'),
+            ({'input_method': 'paste', 'pasted_json': ''}, 'No JSON provided'),
+            ({'input_method': 'api', 'api_url': ''}, 'No API URL provided'),
+            (
+                {'input_method': 'paste', 'pasted_json': '{"a": 1}', 'json_path': 'zz'},
+                'not found',
+            ),
+            (
+                {'input_method': 'paste', 'pasted_json': '{"a": 1}', 'json_path': 'a'},
+                'primitive value',
+            ),
+        ]
+        for data, expected in cases:
+            response = client.post('/process', data=data)
+            assert response.status_code == 400, data
+            assert expected in json.loads(response.data)['error'], data
+
+    def test_process_json_stays_small(self):
+        """3.1 - the extraction is the point; guard against it creeping back."""
+        import ast
+        import inspect
+
+        import routes
+
+        source = inspect.getsource(routes)
+        tree = ast.parse(source)
+        node = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'process_json'
+        )
+        lines = source.splitlines()[node.lineno - 1 : node.end_lineno]
+        code_lines = [ln for ln in lines if ln.strip() and not ln.strip().startswith('#')]
+        assert len(code_lines) <= 50, f'process_json is {len(code_lines)} code lines'
+
+
+class TestHealthSplit:
+    """4.7 - /health/live and /health/ready for load-balancer checks."""
+
+    def test_original_health_is_unchanged(self, client, app):
+        data = json.loads(client.get('/health').data)
+        assert data == {'status': 'ok', 'version': app.config['APP_VERSION']}
+
+    def test_live_reports_the_process_only(self, client, app):
+        response = client.get('/health/live')
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['status'] == 'ok'
+        assert data['version'] == app.config['APP_VERSION']
+        # Liveness must not depend on anything that could fail, or a dependency
+        # outage turns into a restart loop.
+        assert 'checks' not in data
+
+    def test_ready_reports_dependencies(self, client):
+        response = client.get('/health/ready')
+        assert response.status_code == 200
+        data = json.loads(response.data)
+        assert data['status'] == 'ok'
+        # No xlsx_writer entry: openpyxl imports at module scope, so a missing
+        # dependency would stop routes.py loading rather than surface here.
+        assert data['checks'] == {'rate_limit_storage': 'ok'}
+        assert data['rate_limit_storage_backend'] == 'memory'
+
+    def test_ready_returns_503_when_a_dependency_is_down(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.side_effect = RuntimeError('redis down')
+            response = client.get('/health/ready')
+
+        assert response.status_code == 503
+        data = json.loads(response.data)
+        assert data['status'] == 'degraded'
+        assert data['checks']['rate_limit_storage'] == 'unavailable'
+        # The reason stays in the logs, not the body.
+        assert 'redis down' not in response.get_data(as_text=True)
+
+    def test_health_endpoints_are_no_store(self, client):
+        for url in ('/health', '/health/live', '/health/ready'):
+            assert client.get(url).headers['Cache-Control'] == 'no-store', url
+
+    def test_version_gate_applies_to_all_three(self, fresh_config):
+        cfg = fresh_config(HEALTH_REVEAL_VERSION='0')
+        app = create_app(cfg)
+        for url in ('/health', '/health/live', '/health/ready'):
+            assert 'version' not in json.loads(app.test_client().get(url).data), url
+
+
+class TestExportDropdownMarkup:
+    """4.3 / 4.8 - the new formats and the accessibility attributes are present."""
+
+    def test_new_export_formats_are_offered(self, client):
+        html = client.get('/').data.decode('utf-8')
+        for fmt in ('csv', 'tsv', 'jsonl', 'markdown', 'xlsx'):
+            assert f'data-format="{fmt}"' in html, fmt
+
+    def test_dropdown_is_keyboard_accessible(self, client):
+        html = client.get('/').data.decode('utf-8')
+        assert 'aria-haspopup="true"' in html
+        assert 'aria-expanded="false"' in html
+        assert 'role="menu"' in html
+        assert 'role="menuitem"' in html
+
+    def test_about_modal_replaces_alert(self, client, app):
+        html = client.get('/').data.decode('utf-8')
+        assert 'id="aboutModal"' in html
+        # The version comes from config, not a hardcoded string that goes stale.
+        assert app.config['APP_VERSION'] in html
+
+    def test_no_inline_script_or_style(self, client):
+        """
+        CSP has no unsafe-inline, so an inline handler would simply not run.
+
+        `'<script>' not in html` was too weak: it misses `<script type="...">`,
+        `<script >` and any attribute-carrying inline block. Match every script
+        tag and require each one to be an external src, and catch on* handlers
+        generally rather than onclick alone.
+        """
+        html = client.get('/').data.decode('utf-8')
+
+        script_tags = re.findall(r'<script\b[^>]*>', html, flags=re.IGNORECASE)
+        assert script_tags, 'the page should still load its external bundle'
+        for tag in script_tags:
+            assert re.search(r'\bsrc\s*=', tag, flags=re.IGNORECASE), f'inline script: {tag}'
+
+        # No inline event handlers of any name, and no style block or attribute.
+        assert not re.search(r'\son[a-z]+\s*=', html, flags=re.IGNORECASE)
+        assert not re.search(r'<style\b', html, flags=re.IGNORECASE)
+        assert not re.search(r'\sstyle\s*=', html, flags=re.IGNORECASE)
+
+    def test_table_toolbar_controls_exist(self, client):
+        html = client.get('/').data.decode('utf-8')
+        for element_id in ('rowFilter', 'loadMoreBtn', 'loadAllBtn', 'columnsBtn'):
+            assert f'id="{element_id}"' in html, element_id
+
+
+class TestCsrfErrorIsJson:
+    """F10 - a rejected POST must not hand app.js an HTML body to json()-parse."""
+
+    def _app_with_csrf(self, fresh_config):
+        app = create_app(fresh_config())
+        app.config['TESTING'] = True
+        # Deliberately NOT disabling CSRF: this is the behavior under test.
+        return app
+
+    def test_missing_token_returns_json_400(self, fresh_config):
+        app = self._app_with_csrf(fresh_config)
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': '[{"a": 1}]'},
+        )
+        assert response.status_code == 400
+        assert response.content_type.startswith('application/json')
+        assert json.loads(response.data)['error'] == 'CSRF token missing or invalid'
+
+    def test_export_routes_too(self, fresh_config):
+        app = self._app_with_csrf(fresh_config)
+        for url in ('/export-csv', '/export-xlsx'):
+            response = app.test_client().post(
+                url,
+                data=json.dumps({'csv_data': [{'a': 1}], 'csv_columns': ['a']}),
+                content_type='application/json',
+            )
+            assert response.status_code == 400, url
+            assert response.content_type.startswith('application/json'), url
+
+
+class TestPortAllowlistEnvParsing:
+    """
+    Codex review: an explicitly empty API_ALLOWED_PORTS must disable the check.
+
+    The earlier test set app.config directly, so it never exercised the env
+    parsing where unset and empty were folded together.
+    """
+
+    def test_empty_string_disables_the_check(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS='')
+        assert len(cfg.API_ALLOWED_PORTS) == 0
+
+    def test_whitespace_only_disables_the_check(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS='   ')
+        assert len(cfg.API_ALLOWED_PORTS) == 0
+
+    def test_unset_still_selects_the_default(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS=None)
+        assert sorted(cfg.API_ALLOWED_PORTS) == [80, 443, 8443]
+
+    def test_empty_allowlist_from_env_lets_any_port_through(self, fresh_config):
+        cfg = fresh_config(API_ALLOWED_PORTS='')
+        app = create_app(cfg)
+        with app.app_context(), patch('security.socket.getaddrinfo') as mock_dns:
+            mock_dns.return_value = [(2, 1, 6, '', ('93.184.216.34', 0))]
+            assert validate_url('http://public.example.com:22/x')[0] is True
+
+    def test_a_lone_comma_is_rejected_not_read_as_disabled(self, fresh_config):
+        # A bare ',' is a typo, not the documented escape hatch. Reading it as
+        # an empty set would drop the outbound port restriction silently.
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS has an empty element'):
+            fresh_config(API_ALLOWED_PORTS=',')
+
+    def test_a_blank_element_inside_a_list_is_rejected(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS has an empty element'):
+            fresh_config(API_ALLOWED_PORTS='80,,443')
+
+    def test_a_trailing_comma_is_rejected(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_ALLOWED_PORTS has an empty element'):
+            fresh_config(API_ALLOWED_PORTS='80,443,')
+
+    def test_the_rejection_names_the_escape_hatch(self, fresh_config):
+        with pytest.raises(RuntimeError, match='use an empty value to disable the check'):
+            fresh_config(API_ALLOWED_PORTS='80, ,443')
+
+
+class TestReadinessStorageCheck:
+    """
+    Codex review: limits' storages report an unreachable backend by RETURNING
+    False (RedisStorage.check() swallows the error), not only by raising.
+    """
+
+    def test_false_return_marks_storage_unavailable(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.return_value = False
+            response = client.get('/health/ready')
+
+        assert response.status_code == 503
+        data = json.loads(response.data)
+        assert data['status'] == 'degraded'
+        assert data['checks']['rate_limit_storage'] == 'unavailable'
+
+    def test_raised_exception_still_marks_storage_unavailable(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.side_effect = RuntimeError('redis down')
+            response = client.get('/health/ready')
+
+        assert response.status_code == 503
+        assert json.loads(response.data)['checks']['rate_limit_storage'] == 'unavailable'
+        assert 'redis down' not in response.get_data(as_text=True)
+
+    def test_true_return_is_healthy(self, client):
+        with patch('routes.limiter') as mock_limiter:
+            mock_limiter.storage.check.return_value = True
+            response = client.get('/health/ready')
+
+        assert response.status_code == 200
+        assert json.loads(response.data)['checks']['rate_limit_storage'] == 'ok'
+
+
+class TestApiFetchClosesTheResponse:
+    """
+    CodeRabbit review: with stream=True the socket stays open until the body is
+    consumed or the response is closed, and the size-limit path returns with the
+    body only partly read.
+    """
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_response_is_closed_on_the_size_limit_path(self, mock_validate, mock_get, client, app):
+        app.config['API_FETCH_MAX_RESPONSE'] = 100
+        mock_validate.return_value = (True, None)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # More chunks than the cap allows, so the loop bails out mid-body.
+        mock_resp.iter_content.return_value = [b'x' * 80] * 10
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        response = client.post(
+            '/process',
+            data={'input_method': 'api', 'api_url': 'https://api.example.com/data'},
+        )
+
+        assert response.status_code == 400
+        assert 'exceeds maximum size' in json.loads(response.data)['error']
+        mock_resp.__exit__.assert_called()
+
+    @patch('routes.requests.get')
+    @patch('routes.validate_url')
+    def test_response_is_closed_on_the_success_path(self, mock_validate, mock_get, client):
+        mock_validate.return_value = (True, None)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b'[{"a": 1}]']
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
+
+        client.post(
+            '/process',
+            data={
+                'input_method': 'api',
+                'api_url': 'https://api.example.com/data',
+                'json_path': '(root)',
+            },
+        )
+        mock_resp.__exit__.assert_called()
+
+
+class TestSizeMessageFormatting:
+    """CodeRabbit review: a sub-MiB limit reported "0MB"."""
+
+    def test_sub_megabyte_limit_is_reported_in_kb(self, fresh_config):
+        cfg = fresh_config(MAX_UPLOAD_SIZE=str(512 * 1024))
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': 'x' * (1024 * 1024)},
+        )
+        assert response.status_code == 413
+        assert json.loads(response.data)['error'] == 'Request too large (max 512KB)'
+
+    def test_megabyte_limit_still_reads_in_mb(self, fresh_config):
+        cfg = fresh_config(MAX_UPLOAD_SIZE=str(2 * 1024 * 1024))
+        app = create_app(cfg)
+        app.config['WTF_CSRF_ENABLED'] = False
+
+        response = app.test_client().post(
+            '/process',
+            data={'input_method': 'paste', 'pasted_json': 'x' * (3 * 1024 * 1024)},
+        )
+        assert json.loads(response.data)['error'] == 'Request too large (max 2MB)'
+
+    def test_tiny_limit_is_reported_in_bytes(self):
+        from helpers import format_size
+
+        assert format_size(500) == '500 bytes'
+        assert format_size(0) == '0 bytes'
+
+
+class TestDnsWorkerCountValidation:
+    """CodeRabbit review: ThreadPoolExecutor rejects max_workers <= 0."""
+
+    def test_zero_workers_is_rejected_at_import(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_DNS_MAX_WORKERS must be >= 1'):
+            fresh_config(API_DNS_MAX_WORKERS='0')
+        fresh_config(API_DNS_MAX_WORKERS=None)
+
+    def test_negative_workers_is_rejected_at_import(self, fresh_config):
+        with pytest.raises(RuntimeError, match='API_DNS_MAX_WORKERS must be >= 1'):
+            fresh_config(API_DNS_MAX_WORKERS='-2')
+        fresh_config(API_DNS_MAX_WORKERS=None)
+
+    def test_positive_workers_is_accepted(self, fresh_config):
+        cfg = fresh_config(API_DNS_MAX_WORKERS='8')
+        assert cfg.API_DNS_MAX_WORKERS == 8
+
+
+class TestNoImportCycle:
+    """
+    routes.py must not import app.py.
+
+    app.py's create_app() imports `bp` out of routes.py, so a module-level
+    `from app import ...` in routes.py made `import routes` re-enter a
+    half-initialized module and raise ImportError. Only an app-first import
+    order happened to work, which is why the app booted under gunicorn while
+    any routes-first entry point was broken.
+    """
+
+    @staticmethod
+    def _import_in_a_fresh_process(statement):
+        return subprocess.run(
+            [sys.executable, '-c', statement],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            capture_output=True,
+            text=True,
+        )
+
+    def test_routes_can_be_imported_first(self):
+        result = self._import_in_a_fresh_process('import routes; print(routes.bp.name)')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == 'main'
+
+    def test_app_can_still_be_imported_first(self):
+        result = self._import_in_a_fresh_process('import app; print(app.create_app().name)')
+        assert result.returncode == 0, result.stderr
+
+    def test_routes_does_not_import_the_app_module(self):
+        source = pathlib.Path(__file__).resolve().parent.parent / 'routes.py'
+        tree = ast.parse(source.read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split('.')[0])
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name.split('.')[0] for alias in node.names)
+        assert 'app' not in imported
+
+
+class TestApiResponseEncoding:
+    """
+    CodeRabbit review: UnicodeDecodeError subclasses ValueError.
+
+    Before the dedicated handler, a non-UTF-8 API response fell through to the
+    JSONL branch and was reported as malformed JSONL -- untrue for a JSON
+    request, and misleading in both.
+    """
+
+    @staticmethod
+    def _fetch(client, chunks, data_format='json'):
+        with (
+            patch('routes.requests.get') as mock_get,
+            patch('routes.validate_url') as mock_validate,
+        ):
+            mock_validate.return_value = (True, None)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.iter_content.return_value = chunks
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.__enter__.return_value = mock_resp
+            mock_get.return_value = mock_resp
+            return client.post(
+                '/process',
+                data={
+                    'input_method': 'api',
+                    'api_url': 'https://api.example.com/data',
+                    'data_format': data_format,
+                    'json_path': '(root)',
+                },
+            )
+
+    def test_non_utf8_json_response_reports_the_encoding(self, client):
+        # A latin-1 encoded body: valid JSON bytes, invalid UTF-8.
+        response = self._fetch(client, ['{"name": "caf\xe9"}'.encode('latin-1')])
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response must be UTF-8 encoded'
+
+    def test_non_utf8_jsonl_response_reports_the_encoding_too(self, client):
+        response = self._fetch(
+            client, ['{"name": "caf\xe9"}'.encode('latin-1')], data_format='jsonl'
+        )
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response must be UTF-8 encoded'
+
+    def test_malformed_jsonl_still_reports_jsonl(self, client):
+        # The encoding handler must not swallow the case it sits in front of.
+        response = self._fetch(client, [b'{"a": 1}\n{bad}'], data_format='jsonl')
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response is not valid JSONL'
+
+    def test_malformed_json_still_reports_json(self, client):
+        response = self._fetch(client, [b'{not json}'])
+        assert response.status_code == 400
+        assert json.loads(response.data)['error'] == 'API response is not valid JSON'

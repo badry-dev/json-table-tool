@@ -1,0 +1,12 @@
+# Development / CI dependencies. Production installs requirements.txt only.
+-r requirements.txt
+
+# The optional Redis client, so the test suite can exercise the documented
+# multi-worker configuration (roadmap 2.10d). Production installs it separately
+# via requirements-redis.txt; it is deliberately not in requirements.txt.
+-r requirements-redis.txt
+
+pytest==9.0.3
+ruff==0.16.4
+coverage==7.15.4
+pip-audit==2.10.1
