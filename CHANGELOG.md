@@ -7,9 +7,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [1.2.0] - 2026-08-21 — "Hardening & Performance"
 
-Implements `docs/roadmap-v1.2.md`, closing every finding in
-`docs/security-review-v1.2.md` (F1–F17) and `docs/performance-review-v1.2.md`
-(P1–P13).
+Implements the v1.2 roadmap, closing every security finding (F1–F17) and
+performance finding (P1–P13). Those four planning documents were later
+consolidated into `docs/plan-status-v1.2.md`; their full text remains in git
+history at `065883f`.
 
 No response key changed name, type or meaning; `/process` only gained keys.
 
@@ -68,7 +69,7 @@ No response key changed name, type or meaning; `/process` only gained keys.
 - **Diskless, memory-bounded exports (P3).** CSV/TSV are generator-streamed and
   uncapped. XLSX keeps a normal-mode workbook (no OS temp files) plus
   `MAX_EXPORT_CELLS`, measured rather than guessed — see
-  `docs/export-budget-v1.2.md`.
+  `docs/plan-status-v1.2.md`, Appendix A.
 - **Lazy tree picker (P4)** and **client render caps (P5)**: children build on
   first toggle; nested objects stop at 20 keys, primitive arrays at 20 items,
   strings at 500 characters.

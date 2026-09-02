@@ -36,11 +36,9 @@ json-table-tool/
 │       ├── test_render_caps.mjs
 │       └── test_features.mjs
 ├── docs/
-│   ├── code-health-final.md
-│   ├── security-review-v1.2.md
-│   ├── performance-review-v1.2.md
-│   ├── roadmap-v1.2.md
-│   └── export-budget-v1.2.md   # How MAX_EXPORT_CELLS was measured
+│   └── plan-status-v1.2.md     # The planning doc: what shipped, what is pending,
+│                               # the export-budget measurement (App. A) and the
+│                               # perf budget + RSS protocol (App. B)
 ├── .github/workflows/ci.yml    # lint, format, tests, JS assertions, pip-audit
 ├── pyproject.toml       # ruff + pytest configuration
 ├── requirements.txt     # Runtime dependencies (exact-pinned)
@@ -317,7 +315,7 @@ convention is a dedicated bump commit, not a bump ridden along with a feature.
 
 ### Re-deriving the Excel export budget
 `MAX_EXPORT_CELLS` is a measured number, not a chosen one. Follow the method in
-`docs/export-budget-v1.2.md` (fresh process per measured request, `ru_maxrss`
-converted for the platform, delta across two runs), re-fit against the narrowest
-aspect ratio you care about, and re-run a confirming point at the value you
-intend to ship. Record the new data in that file.
+`docs/plan-status-v1.2.md` Appendix A (fresh process per measured request,
+`ru_maxrss` converted for the platform, delta across two runs), re-fit against
+the narrowest aspect ratio you care about, and re-run a confirming point at the
+value you intend to ship. Record the new data in that appendix.
