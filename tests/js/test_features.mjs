@@ -80,6 +80,28 @@ check(() => {
     assert.equal(escapeMarkdownCell({ k: 'v' }), '{"k":"v"}');
 });
 
+// --- 4.3 Markdown: raw HTML in a cell must not survive ---------------------
+check(() => {
+    // Markdown permits raw HTML, so an unescaped '<' carried a live tag into
+    // the exported .md and executed wherever it was rendered.
+    // Escaping '<' alone is what disarms a tag; a bare '>' is inert text.
+    assert.equal(
+        escapeMarkdownCell('<img src=x onerror=alert(1)>'),
+        '&lt;img src=x onerror=alert(1)>',
+    );
+    assert.ok(!escapeMarkdownCell('<script>alert(1)</script>').includes('<script'));
+    assert.equal(escapeMarkdownCell('a < b'), 'a &lt; b');
+    // The <br> the newline rule injects is ours, and must stay a real tag.
+    assert.equal(escapeMarkdownCell('a\nb'), 'a<br>b');
+    assert.equal(escapeMarkdownCell('<x>\n<y>'), '&lt;x><br>&lt;y>');
+});
+
+check(() => {
+    const md = buildMarkdownChunks(['a'], [{ a: '<b>bold</b>' }]).join('');
+    assert.ok(!md.includes('<b>'), 'a cell tag must not reach the exported table');
+    assert.ok(md.includes('&lt;b>bold&lt;/b>'));
+});
+
 check(() => {
     const md = buildMarkdownChunks(['a', 'b'], [{ a: 1, b: 'x|y' }]).join('');
     const lines = md.trim().split('\n');

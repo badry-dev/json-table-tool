@@ -1107,6 +1107,11 @@ function escapeMarkdownCell(value) {
     const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
     return text
         .replace(/\\/g, '\\\\')
+        // Markdown permits raw HTML, so an unescaped '<' carries a live tag --
+        // `<img src=x onerror=...>` -- into the .md file and executes wherever
+        // it is rendered. Escaped before the newline rule below so the '<' of
+        // the <br> that rule injects is not itself escaped.
+        .replace(/</g, '&lt;')
         .replace(/\|/g, '\\|')
         .replace(/\r\n|\r|\n/g, '<br>');
 }
