@@ -36,6 +36,7 @@ function makeElement() {
         setAttribute() {},
         getAttribute() { return 'test-csrf-token'; },
         click() {},
+        focus() {},
         closest() { return null; },
         querySelector() { return makeElement(); },
         querySelectorAll() { return []; },

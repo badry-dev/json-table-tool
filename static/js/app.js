@@ -940,7 +940,7 @@ document.addEventListener('keydown', (e) => {
         }
     }
     if (aboutModal && aboutModal.classList.contains('visible')) {
-        aboutModal.classList.remove('visible');
+        closeAboutModal();
     }
     if (pathModal.classList.contains('visible')) {
         pathModal.classList.remove('visible');
@@ -1222,19 +1222,35 @@ themeToggle.addEventListener('click', () => {
 // About dialog. Replaces alert(), which also hardcoded a version string that
 // went stale the moment APP_VERSION changed -- the modal reads it from config.
 const aboutModal = document.getElementById('aboutModal');
+const aboutLink = document.getElementById('aboutLink');
+const aboutCloseBtn = document.getElementById('aboutClose');
 
-document.getElementById('aboutLink').addEventListener('click', (e) => {
-    e.preventDefault();
+// Opening left focus on the trigger, so the dialog content sat outside the tab
+// order and closing stranded focus at the top of the document. The export and
+// columns dropdowns already move focus in and hand it back; these two helpers
+// give the modal the same contract across all three close paths (button,
+// overlay click, Escape).
+function openAboutModal() {
     aboutModal.classList.add('visible');
+    aboutCloseBtn.focus();
+}
+
+function closeAboutModal() {
+    if (!aboutModal.classList.contains('visible')) return;
+    aboutModal.classList.remove('visible');
+    aboutLink.focus();
+}
+
+aboutLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    openAboutModal();
 });
 
-document.getElementById('aboutClose').addEventListener('click', () => {
-    aboutModal.classList.remove('visible');
-});
+aboutCloseBtn.addEventListener('click', closeAboutModal);
 
 aboutModal.addEventListener('click', (e) => {
     if (e.target === e.currentTarget) {
-        e.currentTarget.classList.remove('visible');
+        closeAboutModal();
     }
 });
 
