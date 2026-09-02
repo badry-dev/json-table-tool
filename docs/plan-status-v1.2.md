@@ -210,7 +210,7 @@ it came from, kept so it can be re-derived when the measurement is re-run.
 
 ### Method
 
-Appendix B's protocol, with one documented deviation.
+Appendix B's protocol, with two documented deviations.
 
 Followed as written: `ru_maxrss` read on Linux (KiB) × 1024, reported in MiB;
 `resource.getrusage(RUSAGE_SELF).ru_maxrss` read after the response was fully
@@ -219,7 +219,7 @@ delivered; each measured process serves **exactly one** request then exits;
 requests); concurrency 1; absolute and delta both recorded; no blocked pairs
 occurred and none were discarded.
 
-**Deviation:** requests went through the Flask test client in a fresh Python
+**Deviations:** requests went through the Flask test client in a fresh Python
 process rather than a fresh gunicorn worker, and the sizing sweep used one
 run-pair per shape rather than the median of three. The property the protocol
 exists to protect — `ru_maxrss` is monotonic per process and cannot be reset
