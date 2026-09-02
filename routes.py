@@ -142,8 +142,9 @@ def health_ready():
     Readiness: is this process able to serve traffic?
 
     Checks only what is cheap and local -- that the rate limiter has usable
-    storage and that the Excel writer imported. Returns 503 when it cannot serve,
-    so a load balancer takes it out of rotation rather than sending it requests.
+    storage. Returns 503 when it cannot serve, so a load balancer takes it out
+    of rotation rather than sending it requests. There is deliberately no Excel
+    writer check; see the comment below.
     """
     checks = {}
 
@@ -519,6 +520,15 @@ def export_csv():
 
         if not csv_data:
             return jsonify({'error': 'No data to export'}), 400
+
+        # _stream_csv calls row.get(), and the generator runs AFTER the response
+        # headers are sent -- so a non-dict row raises inside the WSGI iterator,
+        # where the except below can no longer reach it, and the client keeps a
+        # 200 with a truncated body. Before P3 made this streamed the whole file
+        # was built inside the try and the same payload returned a JSON 500.
+        # Validating the shape up front is what restores that contract.
+        if not all(isinstance(row, dict) for row in csv_data):
+            return jsonify({'error': 'csv_data must be a list of objects'}), 400
 
         # Streamed, and deliberately uncapped: CSV is natively streamable with no
         # temp files, so every dataset /process accepts stays exportable by this
