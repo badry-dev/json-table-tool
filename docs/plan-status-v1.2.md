@@ -144,6 +144,18 @@ data and derivation: **Appendix A**.
   re-deriving the budget means rebuilding it from Appendix A. Committing
   fixtures/generators for the 10 MB reference payload and the 100 k-row `csv_data`
   body would make the budget reproducible rather than re-derivable.
+- **Contributor docs (code-health Phase 6a/6c).** No `CONTRIBUTING.md` exists. The
+  roadmap's Phase 5 acceptance line ("a fresh contributor can set up, lint, test
+  and run coverage using only README + CONTRIBUTING-level docs") is met by the
+  README plus the `Makefile` targets, so this is a packaging question — a separate
+  file with a PR checklist — not a missing-information one.
+- **README JSON edge-case examples (code-health 6d).** Null, boolean, Unicode and
+  mixed-type arrays were to be shown as worked examples. `helpers.py` handles all
+  four and the tests cover them; the README does not illustrate them.
+- **README support line (code-health 6c, partial).** The README points readers at
+  the repository's issue tracker. The tracker exists and is enabled but holds no
+  issues; the 2026-05 review flagged the pointer as directing users nowhere useful.
+  Judgment call: keep it, or replace it with the maintainer contact.
 - **Transitive dependency drift (code-health §12).** Direct dependencies are
   exact-pinned; transitives are not. A lock file (`pip-compile`) was noted as a
   post-review iteration and has not been added.
