@@ -5,7 +5,7 @@
 
 Single index of every point planned across the four planning documents:
 
-- `docs/roadmap-v1.2.md` — Phases 0–5, decisions D1–D6
+- `docs/roadmap-v1.2.md` — Phases 0–5, decisions D1–D6 (all six now closed)
 - `docs/security-review-v1.2.md` — findings F1–F17
 - `docs/performance-review-v1.2.md` — findings P1–P13, perf budget §4
 - `docs/code-health-final.md` — 2026-05 review: top-10 issues, quick wins, larger refactors
@@ -63,7 +63,7 @@ and `requirements*.txt`.
 - **Phase 1 — Security.** All 15 tasks (1.1–1.15); see F-table above.
 - **Phase 2 — Performance.** All 10 tasks (2.1–2.10), including the rate-limit topology guard: `RATELIMIT_STORAGE_URI` is configurable, `WEB_CONCURRENCY` is the single source of truth for workers, `APP_REPLICAS` mirrors `numInstances`, and production refuses to start on `memory://` above one worker × one replica.
 - **Phase 3 — Refactor.** `_load_input` / `_select_table_data` extracted, `process_json` reduced, `openpyxl` imported at module top, `preview_limit` returned, type annotations added to `helpers.py` and `security.py`.
-- **Phase 4 — Features.** 4.1 load more / load all with a 50 000-row DOM guard, 4.2 row filter, 4.3 JSONL + Markdown exports, 4.4 column visibility, 4.5 `#path=` deep links, 4.7 `/health/live` + `/health/ready`, 4.8 in-page About modal and keyboard-accessible export dropdown. (4.6 is not done — see Section 2.)
+- **Phase 4 — Features.** 4.1 load more / load all with a 50 000-row DOM guard, 4.2 row filter, 4.3 JSONL + Markdown exports, 4.4 column visibility, 4.5 `#path=` deep links, 4.7 `/health/live` + `/health/ready`, 4.8 in-page About modal and keyboard-accessible export dropdown. (4.6 was dropped with D4 — see §1.4.)
 - **Phase 5 — Docs/DX.** `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `README.md` synced; `.env.example`; `Makefile`; `CHANGELOG.md`; version bumped to 1.2.0.
 
 ### 1.4 Decisions closed
@@ -75,6 +75,7 @@ and `requirements*.txt`.
 | D3 | Proxy trust is opt-in via `TRUST_PROXY`, off by default |
 | D5 | Port allowlist adopted, default `80,443,8443` |
 | D6 | Exports stay diskless and memory-bounded: normal-mode workbook + measured cell budget; `write_only` and `SpooledTemporaryFile` both rejected, each on its own grounds |
+| D4 | **Declined (2026-09-02).** No Basic Auth gate. Roadmap task 4.6 and its acceptance line are dropped; per the roadmap, nothing else changes |
 
 ### 1.5 Code-health review (2026-05) items now closed
 
@@ -93,15 +94,7 @@ point re-run at the shipped value.
 
 ## Section 2 — Pending / Planned
 
-### 2.1 Open decision
-
-- **D4 — opt-in HTTP Basic Auth gate (roadmap 4.6).** Still unresolved; needs
-  maintainer sign-off. Scope if approved: `APP_BASIC_AUTH_USER` / `APP_BASIC_AUTH_PASS`
-  → `before_request` 401 with constant-time compare and `WWW-Authenticate`, off by
-  default, no persistence. Nothing else depends on it. The roadmap's own
-  recommendation is to approve. No `BASIC_AUTH` code exists in the repository today.
-
-### 2.2 Known limitation awaiting a decision
+### 2.1 Known limitation awaiting a decision
 
 - **JSONL export is not a faithful copy of the input document.** Roadmap 4.3 called
   it "lossless — original values". Shipped behaviour: values are written verbatim
@@ -111,7 +104,7 @@ point re-run at the shipped value.
   flattened ones, doubling the payload and client memory that P2/P12 exist to
   reduce. Explicitly flagged for a maintainer decision, not resolved either way.
 
-### 2.3 Accepted exposures, documented rather than fixed
+### 2.2 Accepted exposures, documented rather than fixed
 
 - **Unbounded DNS teardown (F6.1 / P7 residual).** `getaddrinfo` exposes no timeout
   and cannot be cancelled. `API_DNS_TIMEOUT` bounds only the caller's wait; a pool
@@ -125,7 +118,7 @@ point re-run at the shipped value.
   internal tool to public service: a custom `HTTPAdapter` that resolves once and
   passes the IP with an explicit `Host` header.
 
-### 2.4 Carried-over engineering work
+### 2.3 Carried-over engineering work
 
 - **Type annotations (code-health 7.2, roadmap 3.5) — partial.** `helpers.py` and
   `security.py` are annotated. `routes.py` and `config.py` have no annotated
@@ -149,7 +142,7 @@ point re-run at the shipped value.
   but no `Dockerfile` is checked in. Phase 5 deliberately kept these docs-only; a
   committed Dockerfile is a fresh decision, not pending roadmap work.
 
-### 2.5 Explicitly out of scope — do not implement without a new decision
+### 2.4 Explicitly out of scope — do not implement without a new decision
 
 These are settled exclusions, listed so they are not mistaken for a backlog:
 
@@ -163,6 +156,9 @@ These are settled exclusions, listed so they are not mistaken for a backlog:
 - Payload-level logging or telemetry.
 - Auto keep-alive pings against the Render free tier.
 - Committed `docker-compose` / systemd unit files.
+- **Any app-level authentication gate**, HTTP Basic Auth included (roadmap 4.6 / D4,
+  declined 2026-09-02). Access control stays a deployment concern — put the app
+  behind whatever the network or reverse proxy already enforces.
 
 ---
 
