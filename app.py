@@ -138,6 +138,64 @@ def worker_count_from_start_command(argv):
     return None
 
 
+def worker_timeout_from_start_command(argv):
+    """
+    Return the gunicorn worker timeout the start command names, or None.
+
+    Same inheritance argument as worker_count_from_start_command: the worker
+    forked from the master sees the master's argv, so the command line is the
+    authoritative value rather than something the app has to be told twice.
+    """
+    if not argv or 'gunicorn' not in os.path.basename(argv[0]):
+        return None
+    for index, arg in enumerate(argv):
+        if arg.startswith('--timeout='):
+            value = arg.split('=', 1)[1]
+        elif arg in ('-t', '--timeout') and index + 1 < len(argv):
+            value = argv[index + 1]
+        else:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def check_fetch_timeout_headroom(app, argv=None):
+    """
+    Refuse a deployment whose API fetch can outlive the worker that serves it.
+
+    gunicorn kills a sync worker that has been silent for --timeout seconds. An
+    API_FETCH_TIMEOUT at or above that budget means requests.get() is still
+    waiting when the axe falls, so a slow upstream shows the user a 502 instead
+    of the timeout message the fetch path raises (P9). render.yaml's comment
+    already states the invariant; nothing enforced it.
+
+    Raises under APP_ENV=production and warns otherwise, matching
+    check_rate_limit_topology: a local dev server has no gunicorn argv to read
+    and must not be blocked by a topology it does not have.
+    """
+    argv = sys.argv if argv is None else argv
+    worker_timeout = worker_timeout_from_start_command(argv)
+    if worker_timeout is None:
+        return
+
+    fetch_timeout = app.config.get('API_FETCH_TIMEOUT', 30)
+    if fetch_timeout < worker_timeout:
+        return
+
+    message = (
+        f'API_FETCH_TIMEOUT is {fetch_timeout}s but gunicorn runs '
+        f'--timeout {worker_timeout}s, so a slow upstream fetch is killed with the '
+        f'worker and the client sees a 502 rather than the fetch timeout; raise '
+        f'--timeout above API_FETCH_TIMEOUT, or lower API_FETCH_TIMEOUT below it'
+    )
+    if is_production():
+        raise RuntimeError(message)
+    logger.warning(message)
+
+
 def check_rate_limit_topology(app, argv=None):
     """
     Refuse a production deployment whose rate limiting cannot be trusted.
@@ -233,6 +291,7 @@ def create_app(config_class=Config):
 
     _assert_production_secret_key(app)
     check_rate_limit_topology(app)
+    check_fetch_timeout_headroom(app)
 
     if app.config.get('TRUST_PROXY'):
         # Exactly one trusted hop. Behind Render's load balancer or an Nginx

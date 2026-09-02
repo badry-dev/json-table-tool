@@ -9,7 +9,10 @@ services:
     # --workers comes from WEB_CONCURRENCY so the number gunicorn runs is the
     # same number the app validates (roadmap 2.10b). --timeout must stay above
     # API_FETCH_TIMEOUT (default 30s) or a slow API fetch races the worker kill
-    # and the client sees a 502 instead of the timeout message (P9).
+    # and the client sees a 502 instead of the timeout message (P9). That is no
+    # longer only a comment: check_fetch_timeout_headroom reads this --timeout
+    # out of gunicorn's argv at startup and refuses to boot in production if
+    # API_FETCH_TIMEOUT has caught up with it.
     startCommand: >-
       gunicorn "app:create_app()"
       --bind 0.0.0.0:$PORT
